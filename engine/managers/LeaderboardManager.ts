@@ -4,11 +4,10 @@ import { TANK_CLASSES } from '../../data/tanks';
 
 export class LeaderboardManager {
     lastUpdate: number = 0;
-    currentLeaderboard: LeaderboardEntry[] = []; // Cache locally
+    currentLeaderboard: LeaderboardEntry[] = []; 
 
     shouldUpdate(): boolean {
         const now = Date.now();
-        // Update every 0.5 seconds is enough
         if (now - this.lastUpdate > 500) {
             this.lastUpdate = now;
             return true;
@@ -16,7 +15,6 @@ export class LeaderboardManager {
         return false;
     }
 
-    // NEW: Getter for the GameEngine to send via Network
     getLatest() {
         return this.currentLeaderboard;
     }
@@ -24,9 +22,9 @@ export class LeaderboardManager {
     update(entities: Entity[], player: Entity, playerState: PlayerState) {
         const candidates: LeaderboardEntry[] = [];
 
-        // 1. Remote Players (Identified by PLAYER type but not 'player' ID)
+        // 1. Remote Players (Skip our own ID if the host sends it back)
         entities.forEach(e => {
-            if (e.type === EntityType.PLAYER && e.id !== 'player' && !e.isDead) {
+            if (e.type === EntityType.PLAYER && e.id !== 'player' && e.id !== player.id && !e.isDead) {
                 candidates.push({
                     id: e.id,
                     name: e.name || 'Unknown',
@@ -38,10 +36,10 @@ export class LeaderboardManager {
             }
         });
 
-        // 2. Local Player (Host/Client Self)
+        // 2. Local Player (Add strictly once)
         if (!player.isDead) {
             candidates.push({
-                id: 'player',
+                id: 'player', // Use 'player' or local ID for client recognition
                 name: player.name || 'Me',
                 score: playerState.score,
                 tankClass: TANK_CLASSES[playerState.classPath]?.name || 'Tank',
@@ -50,7 +48,7 @@ export class LeaderboardManager {
             });
         }
 
-        // 3. High Value AI/Bosses (Optional, makes world feel alive)
+        // 3. High Value AI/Bosses
         entities.forEach(e => {
             if (e.type === EntityType.ENEMY && e.teamId !== 'ARENA_CLOSER' && e.scoreValue && e.scoreValue > 1000 && !e.isDead) {
                 candidates.push({

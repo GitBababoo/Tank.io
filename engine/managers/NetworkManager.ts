@@ -11,7 +11,7 @@ const OP_INPUT = 3;  // Player Input
 const OP_CHAT = 4;
 const OP_PING = 5;
 const OP_PONG = 6;
-const OP_LEADERBOARD = 7; // NEW: Dedicated Leaderboard Channel
+const OP_LEADERBOARD = 7; 
 
 export class NetworkManager {
     private handlers: Record<string, NetworkEventHandler[]> = {};
@@ -23,7 +23,6 @@ export class NetworkManager {
     private connections: DataConnection[] = []; 
     private hostConn: DataConnection | null = null;
 
-    // --- DEBUG STATS ---
     public stats = {
         ping: 0,
         rtt: 0,
@@ -35,9 +34,7 @@ export class NetworkManager {
     };
 
     constructor() {
-        // Ping every second
         setInterval(() => this.measurePing(), 1000);
-        // Reset counters every second
         setInterval(() => {
             this.stats.packetsIn = 0; this.stats.packetsOut = 0;
             this.stats.bytesIn = 0; this.stats.bytesOut = 0;
@@ -79,6 +76,7 @@ export class NetworkManager {
                     this.isConnected = true;
                     this.hostConn = conn;
                     
+                    // Send Join Request with initial tank class
                     conn.send({
                         op: OP_JOIN,
                         data: { 
@@ -134,7 +132,6 @@ export class NetworkManager {
         if (raw.op === OP_UPDATE) {
             this.emit('world_update', raw.data);
         } else if (raw.op === OP_LEADERBOARD) {
-            // CRITICAL FIX: Explicit Leaderboard Handler
             this.emit('leaderboard_update', raw.data);
         } else if (raw.op === OP_CHAT) {
             this.emit('chat_message', raw.data);
@@ -157,7 +154,7 @@ export class NetworkManager {
     }
 
     private trackStats(data: any, incoming: boolean) {
-        const size = JSON.stringify(data).length * 2; // Approx bytes
+        const size = JSON.stringify(data).length * 2; 
         if (incoming) {
             this.stats.packetsIn++;
             this.stats.bytesIn += size;
@@ -172,7 +169,7 @@ export class NetworkManager {
     public broadcastWorldState(entities: Entity[]) {
         if (!this.isHost || this.connections.length === 0) return;
         
-        // OPTIMIZATION: Rounding to reduce JSON size
+        // OPTIMIZATION: Send crucial visual data (ClassPath, MaxHealth)
         const snapshot = entities.map(e => ({
             id: e.id,
             t: e.type,
@@ -180,9 +177,9 @@ export class NetworkManager {
             y: Math.round(e.pos.y),
             r: parseFloat(e.rotation.toFixed(2)),
             h: Math.ceil(e.health),
-            m: Math.ceil(e.maxHealth),
+            m: Math.ceil(e.maxHealth), // Send Max HP (Fixes red screen)
             c: e.color,
-            cp: e.classPath,
+            cp: e.classPath || 'basic', // Send Class Path (Fixes invisible tank)
             n: e.name,
             ti: e.teamId
         }));

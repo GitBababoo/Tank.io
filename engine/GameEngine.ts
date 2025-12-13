@@ -63,11 +63,10 @@ export class GameEngine {
   worldController: WorldController;
   
   onUpdateStats: (stats: PlayerState) => void;
-  onDebugUpdate: (stats: any) => void; // NEW: Debug Callback
+  onDebugUpdate: (stats: any) => void; 
   isDestroyed: boolean = false;
-  isDebugMode: boolean = false; // NEW: Toggle state
+  isDebugMode: boolean = false; 
 
-  // Interpolation & Prediction
   private serverReconciliationPosition: Vector2 | null = null;
 
   constructor(
@@ -211,7 +210,7 @@ export class GameEngine {
             color: COLORS.enemy,
             health: 100, maxHealth: 100, damage: 20, isDead: false,
             teamId: undefined, 
-            classPath: data.tank || 'basic',
+            classPath: data.tank || 'basic', // Host must store remote tank class
             scoreValue: 0,
             // @ts-ignore
             remoteInput: { x: 0, y: 0, fire: false, r: 0 } 
@@ -243,14 +242,17 @@ export class GameEngine {
 
             if (remote.id === this.networkManager.myId) {
                 // Client-Side Prediction Reconciliation
-                // If local position drifts too far from server, snap or lerp back
                 this.serverReconciliationPosition = { x: remote.x, y: remote.y };
                 
-                // Sync Vital Stats
+                // Sync Vital Stats (Fix Red Screen by syncing maxHealth)
                 this.playerManager.entity.health = remote.h;
+                if (remote.m) {
+                    this.playerManager.entity.maxHealth = remote.m;
+                    this.playerManager.state.maxHealth = remote.m; // Sync state too
+                }
                 this.playerManager.state.score = remote.s || 0;
             } else {
-                // Smooth Interpolation for Remote Entities
+                // Sync Other Entities
                 let ent = this.entityManager.entities.find(e => e.id === remote.id);
                 if (!ent) {
                     ent = {
@@ -262,11 +264,11 @@ export class GameEngine {
                         rotation: remote.r,
                         color: remote.c || '#fff',
                         health: remote.h,
-                        maxHealth: remote.m,
+                        maxHealth: remote.m || 100, // Default to avoid divide by zero
                         damage: 0,
                         isDead: false,
                         name: remote.n,
-                        classPath: remote.cp,
+                        classPath: remote.cp || 'basic', // FIX INVISIBLE TANK: Default to basic if missing
                         teamId: remote.ti,
                         targetPos: { x: remote.x, y: remote.y }
                     };
@@ -274,14 +276,14 @@ export class GameEngine {
                 } else {
                     ent.targetPos = { x: remote.x, y: remote.y };
                     
-                    // Smooth Rotation
                     let diff = remote.r - ent.rotation;
                     while (diff < -Math.PI) diff += Math.PI * 2;
                     while (diff > Math.PI) diff -= Math.PI * 2;
                     ent.rotation += diff * 0.5;
 
                     ent.health = remote.h;
-                    ent.classPath = remote.cp;
+                    ent.maxHealth = remote.m || ent.maxHealth;
+                    if (remote.cp) ent.classPath = remote.cp; // Update class if changed
                 }
             }
         });
@@ -294,7 +296,6 @@ export class GameEngine {
         });
     });
 
-    // CRITICAL: Leaderboard Sync
     this.networkManager.on('leaderboard_update', (data) => {
         if (!this.networkManager.isHost) {
             this.playerManager.state.leaderboard = data;
@@ -330,7 +331,6 @@ export class GameEngine {
   update(dt: number) {
     if (this.isDestroyed) return;
     
-    // --- HOST LOGIC ---
     if (this.networkManager.isHost) {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
@@ -339,13 +339,10 @@ export class GameEngine {
             this.deathManager.handleDeath(v, k, entities);
         };
 
-        // Process Remote Input
         entities.forEach(ent => {
             if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
                 const input = (ent as any).remoteInput;
                 const speed = this.statManager.getStat(ent, 'moveSpd') * 60;
-                
-                // Simple Physics
                 ent.vel.x += input.x * speed * dt * 5; 
                 ent.vel.y += input.y * speed * dt * 5;
                 ent.rotation = input.r; 
@@ -371,20 +368,16 @@ export class GameEngine {
 
         ParticleSystem.update(entities, dt);
         
-        // Broadcast
+        // Broadcast with max health included
         this.networkManager.broadcastWorldState([player, ...entities]);
 
-        // Leaderboard (Low Freq)
         if (this.leaderboardManager.shouldUpdate()) {
             this.leaderboardManager.update(entities, player, this.playerManager.state);
             this.playerManager.emitUpdate();
             this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
         }
     
-    } 
-    
-    // --- CLIENT LOGIC ---
-    else {
+    } else {
         const move = this.inputManager.getMovementVector();
         const fire = this.inputManager.getIsFiring();
         this.networkManager.sendClientInput({ 
@@ -394,29 +387,26 @@ export class GameEngine {
             fire: fire
         });
 
-        // Client-Side Prediction (Run local physics)
         this.playerController.update(dt, [], () => {}); 
         const player = this.playerManager.entity;
         
         PhysicsSystem.updateMovement([player], dt, this.statManager, WORLD_SIZE, WORLD_SIZE);
 
-        // Reconciliation
         if (this.serverReconciliationPosition) {
             const dx = this.serverReconciliationPosition.x - player.pos.x;
             const dy = this.serverReconciliationPosition.y - player.pos.y;
             const dist = Math.hypot(dx, dy);
 
-            if (dist > 100) { // Teleport if too far
+            if (dist > 100) { 
                 player.pos.x = this.serverReconciliationPosition.x;
                 player.pos.y = this.serverReconciliationPosition.y;
-            } else if (dist > 5) { // Lerp if small drift
+            } else if (dist > 5) {
                 player.pos.x += dx * 0.1;
                 player.pos.y += dy * 0.1;
             }
             this.serverReconciliationPosition = null;
         }
 
-        // Interpolation for others
         this.entityManager.entities.forEach(ent => {
             if (ent.targetPos) {
                 ent.pos.x += (ent.targetPos.x - ent.pos.x) * 0.3; 
@@ -432,7 +422,6 @@ export class GameEngine {
         this.playerManager.state.notifications = this.notificationManager.notifications;
     }
 
-    // --- DEBUG DATA EXPORT ---
     if (this.isDebugMode) {
         this.onDebugUpdate({
             fps: Math.round(this.renderSystem.currentFps),
@@ -449,7 +438,7 @@ export class GameEngine {
     }
   }
 
-  // ... (Render and other methods remain) ...
+  // ... (Render and other methods) ...
   render() {
     const cameraConfig = this.cameraManager.getCameraTarget(this.playerManager.entity, this.entityManager.entities);
     this.renderSystem.draw(
@@ -476,11 +465,9 @@ export class GameEngine {
   }
 
   private handleKeyDown = (e: KeyboardEvent) => {
-      // NEW: F2 Debug Toggle
       if (e.code === 'F2') {
           this.isDebugMode = !this.isDebugMode;
           this.pushNotification(`Developer Mode: ${this.isDebugMode ? 'ON' : 'OFF'}`);
-          // Clear debug view if turning off
           if (!this.isDebugMode) this.onDebugUpdate(null); 
       }
 
