@@ -11,17 +11,12 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ serverName, onComp
     const [logs, setLogs] = useState<string[]>([]);
 
     useEffect(() => {
-        // Detect current host to show user where they are connecting
-        const host = window.location.hostname;
-        const port = "8080";
-        const wsUrl = `ws://${host}:${port}`;
-
         const steps = [
             "Initializing Neural Link...",
-            `Resolving Host: ${host}`,
-            `Handshake: ${wsUrl}`,
+            `Authenticating with Global Relay...`,
+            `Syncing World State: ${serverName}`,
             "Loading Assets...",
-            "Syncing World State..."
+            "Deploying Unit..."
         ];
 
         let currentStep = 0;

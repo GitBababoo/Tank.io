@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+
+import React, { useState, useEffect } from 'react';
 import { GAME_MODES } from '../constants';
 import { GameMode, FactionType, ServerRegion } from '../types';
 import { TankGallery } from './TankGallery';
@@ -6,6 +7,8 @@ import { BossGallery } from './BossGallery';
 import { LegalModal } from './LegalModal';
 import { PrivacyModal } from './PrivacyModal';
 import { Settings, Book, Database, Sword, Play, Globe } from 'lucide-react';
+import { db } from '../firebase';
+import { ref, onValue } from 'firebase/database';
 
 interface LobbyViewProps {
   onStart: (name: string, mode: GameMode, faction: FactionType, selectedClass: string, region: ServerRegion) => void;
@@ -17,31 +20,21 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
   const [name, setName] = useState('');
   const [selectedMode, setSelectedMode] = useState<GameMode>('FFA');
   const [onlineCount, setOnlineCount] = useState<number>(0);
-  const [inGameCount, setInGameCount] = useState<number>(0);
   const [showGlossary, setShowGlossary] = useState(false);
   const [showGallery, setShowGallery] = useState(false);
   const [showBossGallery, setShowBossGallery] = useState(false);
   const [showLegal, setShowLegal] = useState(false);
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [mounted, setMounted] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
 
-  // Dynamic Region Detection for Local Network Play
-  const getWebSocketUrl = () => {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.hostname;
-      // If dev, use 8080, else assume same port or proxied
-      const port = (host === 'localhost' || host === '127.0.0.1') ? ':8080' : (window.location.port ? `:${window.location.port}` : '');
-      return `${protocol}//${host}${port}/ws`;
-  };
-
+  // Region is now "Global" since Firebase is centralized
   const currentRegion: ServerRegion = { 
-      id: 'local', 
-      name: window.location.hostname === 'localhost' ? 'Localhost' : 'Network Server', 
-      flag: '🟢', 
-      ping: 5, 
+      id: 'global', 
+      name: 'Global Server', 
+      flag: '🌎', 
+      ping: 45, 
       occupancy: 0, 
-      url: 'public', // This tells NetworkManager to calculate dynamic URL
+      url: 'firebase', 
       type: 'OFFICIAL' 
   };
   
@@ -50,37 +43,23 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
       const savedName = localStorage.getItem('tank_io_nickname');
       if (savedName) setName(savedName);
       
-      const connectLobby = () => {
-          try {
-              const wsUrl = getWebSocketUrl();
-              const ws = new WebSocket(wsUrl);
-              wsRef.current = ws;
-
-              ws.onmessage = (e) => {
-                  if (typeof e.data === 'string') {
-                      try {
-                          const msg = JSON.parse(e.data);
-                          if (msg.t === 'stats') {
-                              setOnlineCount(msg.d.online);
-                              setInGameCount(msg.d.ingame);
-                          }
-                      } catch (err) {}
-                  }
-              };
-          } catch(e) {
-              console.warn("Server unavailable");
+      // Listen to total players in FFA room as a sample
+      const playerCountRef = ref(db, 'rooms/FFA/players');
+      const unsub = onValue(playerCountRef, (snapshot) => {
+          if (snapshot.exists()) {
+              setOnlineCount(snapshot.size);
+          } else {
+              setOnlineCount(0);
           }
-      };
+      });
 
-      connectLobby();
-      return () => { if (wsRef.current) wsRef.current.close(); };
+      return () => unsub();
   }, []);
 
   const handleStart = () => {
       let finalName = name.trim();
       if (!finalName) finalName = `Commander_${Math.floor(Math.random()*1000)}`;
       localStorage.setItem('tank_io_nickname', finalName);
-      if (wsRef.current) wsRef.current.close();
       onStart(finalName, selectedMode, FactionType.NONE, 'basic', currentRegion);
   };
 
@@ -126,11 +105,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
                 <div className="text-right flex gap-6">
                     <div>
                         <div className="text-2xl font-mono font-black text-white">{onlineCount}</div>
-                        <div className="text-[9px] text-slate-500 font-bold uppercase">Online</div>
-                    </div>
-                    <div>
-                        <div className="text-2xl font-mono font-black text-green-400">{inGameCount}</div>
-                        <div className="text-[9px] text-slate-500 font-bold uppercase">Fighting</div>
+                        <div className="text-[9px] text-slate-500 font-bold uppercase">Players</div>
                     </div>
                 </div>
             </div>
