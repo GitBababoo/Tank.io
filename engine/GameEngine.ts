@@ -313,6 +313,11 @@ export class GameEngine {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
 
+        // Create a wrapper for handleDeath to satisfy type requirements (expects 3 args)
+        const handleDeathWrapper = (v: Entity, k: Entity) => {
+            this.deathManager.handleDeath(v, k, entities);
+        };
+
         // Apply Remote Inputs to other players
         entities.forEach(ent => {
             if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
@@ -335,14 +340,14 @@ export class GameEngine {
         this.playerController.update(dt, entities, this.pushNotification.bind(this));
         if (!player.isDead) {
             const handleHitscan = (start: Vector2, angle: number, owner: Entity, barrel: Barrel) => 
-                PhysicsSystem.processHitscan(start, angle, owner, barrel, entities, player, this.deathManager.handleDeath.bind(this.deathManager), this.cameraManager, this.statManager, this.statusEffectSystem, this.audioManager);
+                PhysicsSystem.processHitscan(start, angle, owner, barrel, entities, player, handleDeathWrapper, this.cameraManager, this.statManager, this.statusEffectSystem, this.audioManager);
             
             this.playerController.handleFiring(dt, entities, handleHitscan);
         }
 
         // Run AI & Physics
-        this.aiController.update(dt, entities, player, this.cameraManager, this.deathManager.handleDeath.bind(this.deathManager));
-        this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, this.deathManager.handleDeath.bind(this.deathManager));
+        this.aiController.update(dt, entities, player, this.cameraManager, handleDeathWrapper);
+        this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, handleDeathWrapper);
         
         // Spawn Logic
         if (this.gameMode !== 'SANDBOX') {
