@@ -38,16 +38,30 @@ export class NetworkManager {
         }
 
         return new Promise((resolve, reject) => {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const host = window.location.hostname;
-            const port = '8080';
-            
             const uid = info.id || `guest_${Math.random().toString(36).slice(2)}`;
             const roomParam = info.roomId ? `&room=${info.roomId}` : '';
-            const url = `${protocol}//${host}:${port}/ws?uid=${uid}${roomParam}`;
+            
+            // --- CONNECTION LOGIC UPDATE ---
+            // 1. Check for Environment Variable (For Vercel Production)
+            // 2. Fallback to Localhost logic if not set
+            let wsUrl = "";
+            
+            // @ts-ignore
+            const envUrl = import.meta.env.VITE_GAME_SERVER_URL;
 
-            console.log(`[NET] Connecting to ${url}`);
-            this.ws = new WebSocket(url);
+            if (envUrl) {
+                // If provided via Env Var (e.g. wss://my-game-server.railway.app)
+                wsUrl = `${envUrl}/ws?uid=${uid}${roomParam}`;
+            } else {
+                // Localhost Development fallback
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.hostname;
+                const port = '8080';
+                wsUrl = `${protocol}//${host}:${port}/ws?uid=${uid}${roomParam}`;
+            }
+
+            console.log(`[NET] Connecting to ${wsUrl}`);
+            this.ws = new WebSocket(wsUrl);
             this.ws.binaryType = 'arraybuffer';
 
             this.ws.onopen = () => {
