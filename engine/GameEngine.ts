@@ -313,7 +313,7 @@ export class GameEngine {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
 
-        // Create a wrapper for handleDeath to satisfy type requirements (expects 3 args)
+        // Create a wrapper for handleDeath to satisfy type requirements (expects 3 args, but callbacks provide 2)
         const handleDeathWrapper = (v: Entity, k: Entity) => {
             this.deathManager.handleDeath(v, k, entities);
         };
@@ -345,7 +345,7 @@ export class GameEngine {
             this.playerController.handleFiring(dt, entities, handleHitscan);
         }
 
-        // Run AI & Physics
+        // Run AI & Physics (Pass wrapper instead of raw method)
         this.aiController.update(dt, entities, player, this.cameraManager, handleDeathWrapper);
         this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, handleDeathWrapper);
         
