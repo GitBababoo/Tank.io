@@ -3,7 +3,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { GameEngine } from '../engine/GameEngine';
-import { PlayerState, GameSettings, GameMode, FactionType, ServerRegion } from '../types';
+import { PlayerState, GameSettings, GameMode, FactionType, ServerRegion, StatKey } from '../types';
 import { DEFAULT_SETTINGS, BASE_STATS } from '../constants';
 import { HUD } from './HUD';
 import { LobbyView } from './LobbyView';
