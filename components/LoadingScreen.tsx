@@ -72,7 +72,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ serverName, onComp
 
                 <div className="h-32 overflow-hidden border border-cyan-900/50 bg-black/50 rounded p-2 text-[10px] font-mono leading-relaxed text-cyan-600 shadow-inner">
                     {logs.map((log, i) => (
-                        <div key={i} className="animate-fade-in-down">> {log}</div>
+                        <div key={i} className="animate-fade-in-down">&gt; {log}</div>
                     ))}
                     <div className="animate-pulse">_</div>
                 </div>
