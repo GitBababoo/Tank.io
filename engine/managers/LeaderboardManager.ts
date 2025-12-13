@@ -4,10 +4,11 @@ import { TANK_CLASSES } from '../../data/tanks';
 
 export class LeaderboardManager {
     lastUpdate: number = 0;
-    currentLeaderboard: LeaderboardEntry[] = []; // Store it locally
+    currentLeaderboard: LeaderboardEntry[] = []; // Cache locally
 
     shouldUpdate(): boolean {
         const now = Date.now();
+        // Update every 0.5 seconds is enough
         if (now - this.lastUpdate > 500) {
             this.lastUpdate = now;
             return true;
@@ -15,6 +16,7 @@ export class LeaderboardManager {
         return false;
     }
 
+    // NEW: Getter for the GameEngine to send via Network
     getLatest() {
         return this.currentLeaderboard;
     }
@@ -22,12 +24,12 @@ export class LeaderboardManager {
     update(entities: Entity[], player: Entity, playerState: PlayerState) {
         const candidates: LeaderboardEntry[] = [];
 
-        // 1. Add all player entities (remote players)
+        // 1. Remote Players (Identified by PLAYER type but not 'player' ID)
         entities.forEach(e => {
             if (e.type === EntityType.PLAYER && e.id !== 'player' && !e.isDead) {
                 candidates.push({
                     id: e.id,
-                    name: e.name || 'Player',
+                    name: e.name || 'Unknown',
                     score: e.scoreValue || 0,
                     tankClass: TANK_CLASSES[e.classPath || 'basic']?.name || 'Tank',
                     teamId: e.teamId,
@@ -36,11 +38,11 @@ export class LeaderboardManager {
             }
         });
 
-        // 2. Add the local player
+        // 2. Local Player (Host/Client Self)
         if (!player.isDead) {
             candidates.push({
                 id: 'player',
-                name: player.name || 'Player',
+                name: player.name || 'Me',
                 score: playerState.score,
                 tankClass: TANK_CLASSES[playerState.classPath]?.name || 'Tank',
                 teamId: player.teamId,
@@ -48,12 +50,12 @@ export class LeaderboardManager {
             });
         }
 
-        // 3. Add bots
+        // 3. High Value AI/Bosses (Optional, makes world feel alive)
         entities.forEach(e => {
-            if (e.type === EntityType.ENEMY && e.teamId !== 'ARENA_CLOSER' && e.scoreValue && !e.isDead) {
+            if (e.type === EntityType.ENEMY && e.teamId !== 'ARENA_CLOSER' && e.scoreValue && e.scoreValue > 1000 && !e.isDead) {
                 candidates.push({
                     id: e.id,
-                    name: e.name || 'An unnamed tank',
+                    name: e.name || 'Elite Tank',
                     score: e.scoreValue,
                     tankClass: e.classPath ? (TANK_CLASSES[e.classPath]?.name || 'Tank') : 'Tank',
                     teamId: e.teamId,
@@ -62,10 +64,14 @@ export class LeaderboardManager {
             }
         });
 
+        // Sort Highest Score First
         candidates.sort((a, b) => b.score - a.score);
+        
+        // Keep top 10
         this.currentLeaderboard = candidates.slice(0, 10);
         playerState.leaderboard = this.currentLeaderboard;
 
+        // Update Leader Arrow Position
         if (candidates.length > 0) {
             const leader = candidates[0];
             if (leader.isPlayer) {

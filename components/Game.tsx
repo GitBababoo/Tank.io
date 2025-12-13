@@ -155,8 +155,9 @@ export const Game: React.FC = () => {
         <>
             <canvas ref={canvasRef} className="block w-full h-full outline-none touch-none" tabIndex={0} />
             
-            {/* NET STATS DISPLAY - Moved to Top Right to avoid Upgrade Menu */}
-            <div className="absolute top-2 right-2 md:right-auto md:left-[280px] z-20 flex gap-2 pointer-events-none">
+            {/* NET STATS DISPLAY - Moved to Top Right to avoid Upgrade Menu overlap */}
+            {/* Added md:left-[280px] to accommodate leaderboard if necessary, or just put top-right */}
+            <div className="absolute top-2 right-2 flex gap-2 pointer-events-none z-20">
                 <div className="bg-black/60 px-3 py-1 rounded text-[10px] font-mono font-bold text-green-400 flex items-center gap-2 border border-green-900/50">
                     <Wifi size={12} className={netStats.ping < 100 ? 'text-green-500' : 'text-yellow-500'} />
                     <span>{isHost ? 'HOST' : `${netStats.ping}ms`}</span>
