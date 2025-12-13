@@ -9,8 +9,9 @@ const OP_JOIN = 1;
 const OP_UPDATE = 2;
 const OP_INPUT = 3;
 const OP_CHAT = 4;
-const OP_PING = 5; // NEW: Ping operation
-const OP_PONG = 6; // NEW: Pong operation
+const OP_PING = 5;
+const OP_PONG = 6;
+const OP_LEADERBOARD = 7; // NEW: Leaderboard Sync Protocol
 
 export class NetworkManager {
     private handlers: Record<string, NetworkEventHandler[]> = {};
@@ -25,19 +26,15 @@ export class NetworkManager {
     // Monitoring Stats
     public latency: number = 0;
     public connectedPeers: number = 0;
-    private lastPingTime: number = 0;
 
     constructor() {
-        // Start Ping Loop
         setInterval(() => this.measurePing(), 1000);
     }
-
-    // ... (Host/Join Logic remains same until we attach listeners) ...
 
     async hostGame(playerInfo: { name: string; mode: GameMode }) {
         this.isHost = true;
         this.isConnected = true;
-        this.peer = new Peer(); // Auto-generate ID
+        this.peer = new Peer(); 
 
         return new Promise<string>((resolve, reject) => {
             this.peer!.on('open', (id) => {
@@ -101,7 +98,6 @@ export class NetworkManager {
                 this.broadcast({ op: OP_CHAT, data: raw.data });
                 this.emit('chat_message', raw.data);
             } else if (raw.op === OP_PING) {
-                // Reply to Ping immediately
                 conn.send({ op: OP_PONG, t: raw.t });
             }
         });
@@ -115,27 +111,26 @@ export class NetworkManager {
 
     private updatePeerCount() {
         this.connectedPeers = this.connections.length;
-        // Emit to UI
         this.emit('net_stat', { players: this.connectedPeers + 1, ping: 0 });
     }
 
     private handleClientMessage(raw: any) {
         if (raw.op === OP_UPDATE) {
             this.emit('world_update', raw.data);
+        } else if (raw.op === OP_LEADERBOARD) {
+            // NEW: Handle receiving leaderboard data from Host
+            this.emit('leaderboard_update', raw.data);
         } else if (raw.op === OP_CHAT) {
             this.emit('chat_message', raw.data);
         } else if (raw.op === OP_PONG) {
-            // Calculate Latency (Round Trip Time)
             const now = Date.now();
             this.latency = now - raw.t;
-            this.emit('net_stat', { players: -1, ping: this.latency }); // -1 means don't update players count (Client doesn't know total)
+            this.emit('net_stat', { players: -1, ping: this.latency });
         }
     }
 
-    // --- REAL PING MEASUREMENT ---
     private measurePing() {
         if (this.isHost) {
-            // Host has 0 ping
             this.latency = 0;
             this.emit('net_stat', { players: this.connections.length + 1, ping: 0 });
         } else if (this.hostConn?.open) {
@@ -144,12 +139,11 @@ export class NetworkManager {
         }
     }
 
-    // ... (Broadcast and Send Input methods remain roughly the same) ...
+    // --- BROADCAST FUNCTIONS ---
 
     public broadcastWorldState(entities: Entity[]) {
         if (!this.isHost || this.connections.length === 0) return;
         
-        // Optimization: Create lightweight snapshot
         const snapshot = entities.map(e => ({
             id: e.id,
             t: e.type,
@@ -165,6 +159,12 @@ export class NetworkManager {
         }));
 
         this.broadcast({ op: OP_UPDATE, data: snapshot });
+    }
+
+    // NEW: Explicitly broadcast leaderboard
+    public broadcastLeaderboard(leaderboardData: any[]) {
+        if (!this.isHost || this.connections.length === 0) return;
+        this.broadcast({ op: OP_LEADERBOARD, data: leaderboardData });
     }
 
     private broadcast(msg: any) {
@@ -198,9 +198,4 @@ export class NetworkManager {
     private emit(event: string, data: any) {
         if (this.handlers[event]) this.handlers[event].forEach(handler => handler(data));
     }
-    
-    // Legacy stubs
-    syncPlayerState() {} 
-    syncPlayerDetails() {}
-    processInterpolation() {}
 }

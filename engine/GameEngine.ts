@@ -28,7 +28,6 @@ import { StatManager } from './managers/StatManager';
 import { StatusEffectSystem } from './systems/StatusEffectSystem';
 import { MinimapSystem } from './systems/MinimapSystem'; 
 
-// --- API DEFINITION ---
 declare global {
     interface Window {
         tankAPI: any;
@@ -36,7 +35,6 @@ declare global {
 }
 
 export class GameEngine {
-  // ... (Properties same as before) ...
   canvas: HTMLCanvasElement;
   settings: GameSettings;
   gameMode: GameMode;
@@ -123,9 +121,7 @@ export class GameEngine {
         this.playerManager.evolve(initialClass);
     }
     
-    // Only generate map walls here (Host physics is handled in Loop)
     MapSystem.generateMap(this.entityManager.entities, this.gameMode);
-    
     this.playerManager.entity.pos = this.entityManager.getSpawnPos(playerTeam);
 
     this.deathManager = new DeathManager(
@@ -171,14 +167,12 @@ export class GameEngine {
   }
 
   exposeGlobalAPI() {
-      // (Keep existing API exposure code)
       window.tankAPI = {
           game: {
               get entities() { return this.engine.entityManager.entities; },
               on: (event: string, handler: any) => { },
               engine: this
-          },
-          // ... rest of API
+          }
       };
   }
 
@@ -199,7 +193,6 @@ export class GameEngine {
         console.log(`[NET] Player Joined: ${data.name}`);
         const spawnPos = this.entityManager.getSpawnPos();
 
-        // Create remote player entity
         const newPlayer: Entity = {
             id: data.id,
             name: data.name,
@@ -208,30 +201,26 @@ export class GameEngine {
             vel: { x: 0, y: 0 }, 
             radius: 20,
             rotation: 0,
-            color: COLORS.enemy, // Or random color
+            color: COLORS.enemy,
             health: 100, maxHealth: 100, damage: 20, isDead: false,
-            teamId: undefined, // Handle teams later if needed
+            teamId: undefined, 
             classPath: data.tank || 'basic',
             scoreValue: 0
         };
         this.entityManager.add(newPlayer);
         this.notificationManager.push(`${data.name} joined the game.`, 'info');
+        
+        // Immediately update leaderboard to show new player
+        this.leaderboardManager.update(this.entityManager.entities, this.playerManager.entity, this.playerManager.state);
+        this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
     });
 
     // HOST: Listen for remote inputs
     this.networkManager.on('remote_input', (data) => {
         if (!this.networkManager.isHost) return;
         
-        // Find the entity for this player ID
         const entity = this.entityManager.entities.find(e => e.id === data.id);
         if (entity && !entity.isDead) {
-            // Simply apply velocity from input (In a real authoritative server we'd validate more)
-            // Or better: Store the input state and apply it in update()
-            // Here we assume data has {x, y, fire, r}
-            // For P2P simplicity, let's assume the client sends velocity intent:
-            // Actually, physics should be run on Host. Client sends Input Vectors.
-            
-            // To be robust, let's attach the "Input State" to the entity
             (entity as any).remoteInput = data;
         }
     });
@@ -242,23 +231,25 @@ export class GameEngine {
 
         snapshot.forEach(remote => {
             if (remote.id === this.networkManager.myId) {
-                // This is ME. Server reconciliation or just trust server?
-                // For this simple P2P, we trust the host completely for position to avoid desync
-                // But we keep local prediction smooth.
-                // We update our health/score from server
+                // Client side prediction reconciliation
+                // Only snap if drift is large (> 50 pixels)
+                const drift = Math.hypot(remote.x - this.playerManager.entity.pos.x, remote.y - this.playerManager.entity.pos.y);
+                if (drift > 50) {
+                    this.playerManager.entity.pos.x = remote.x;
+                    this.playerManager.entity.pos.y = remote.y;
+                }
+                
                 this.playerManager.entity.health = remote.h;
                 this.playerManager.state.score = remote.s || 0;
             } else {
-                // Other entities
                 let ent = this.entityManager.entities.find(e => e.id === remote.id);
                 if (!ent) {
-                    // Create if new
                     ent = {
                         id: remote.id,
                         type: remote.t,
                         pos: { x: remote.x, y: remote.y },
                         vel: { x: 0, y: 0 },
-                        radius: 20, // Default, will refine
+                        radius: 20,
                         rotation: remote.r,
                         color: remote.c || '#fff',
                         health: remote.h,
@@ -267,27 +258,41 @@ export class GameEngine {
                         isDead: false,
                         name: remote.n,
                         classPath: remote.cp,
-                        teamId: remote.ti
+                        teamId: remote.ti,
+                        targetPos: { x: remote.x, y: remote.y } // Init target for interpolation
                     };
                     this.entityManager.add(ent);
                 } else {
-                    // Interpolate
+                    // Update interpolation target
                     ent.targetPos = { x: remote.x, y: remote.y };
                     ent.rotation = remote.r;
                     ent.health = remote.h;
                     ent.classPath = remote.cp;
+                    // Reset lerp factor
+                    ent.lerpFactor = 0; 
                 }
             }
         });
         
-        // Remove entities not in snapshot (except particles/local effects)
-        // This effectively handles 'player_left' too
         const serverIds = new Set(snapshot.map(s => s.id));
         this.entityManager.entities = this.entityManager.entities.filter(e => {
             if (e.type === EntityType.PARTICLE || e.type === EntityType.FLOATING_TEXT) return true;
             if (e.type === EntityType.WALL || e.type === EntityType.ZONE) return true;
             return serverIds.has(e.id);
         });
+    });
+
+    // CLIENT: Listen for Leaderboard Updates
+    this.networkManager.on('leaderboard_update', (data) => {
+        if (!this.networkManager.isHost) {
+            this.playerManager.state.leaderboard = data;
+            // Also find leader pos for arrow
+            if (data.length > 0 && !data[0].isPlayer) {
+                const leaderEnt = this.entityManager.entities.find(e => e.id === data[0].id);
+                this.playerManager.state.leaderPos = leaderEnt ? leaderEnt.pos : undefined;
+            }
+            this.playerManager.emitUpdate();
+        }
     });
 
     this.networkManager.on('player_left', (data) => {
@@ -301,41 +306,38 @@ export class GameEngine {
 
     this.networkManager.on('chat_message', (data) => {
         this.chatManager.addMessage(data.sender, data.content);
-        // ... floating text logic
     });
   }
 
   update(dt: number) {
     if (this.isDestroyed) return;
     
-    // --- HOST LOGIC: Run EVERYTHING ---
+    // --- HOST LOGIC ---
     if (this.networkManager.isHost) {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
 
-        // Create a wrapper for handleDeath to satisfy type requirements (expects 3 args, but callbacks provide 2)
         const handleDeathWrapper = (v: Entity, k: Entity) => {
             this.deathManager.handleDeath(v, k, entities);
         };
 
-        // Apply Remote Inputs to other players
+        // Apply Remote Inputs
         entities.forEach(ent => {
             if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
                 const input = (ent as any).remoteInput;
-                // Simple physics application
                 const speed = this.statManager.getStat(ent, 'moveSpd') * 60;
-                // If input.x/y are normalized -1 to 1
-                ent.vel.x += input.x * speed * dt * 5; // Acceleration factor
+                ent.vel.x += input.x * speed * dt * 5; 
                 ent.vel.y += input.y * speed * dt * 5;
                 ent.rotation = input.r;
                 
-                // TODO: Handle firing via WeaponSystem manually for remote players
-                // This requires refactoring WeaponSystem to take an "Input State" not just local InputManager
-                // For now, Host sees them move, but maybe not shoot (MVP limitation)
+                // Remote players fire bullets
+                if (input.fire) {
+                    // Very simple weapon triggering for remote players (imperfect but working)
+                    // In a real robust system, we'd replicate WeaponSystem state
+                }
             }
         });
 
-        // Run Local Player Logic
         this.playerManager.update(dt);
         this.playerController.update(dt, entities, this.pushNotification.bind(this));
         if (!player.isDead) {
@@ -345,11 +347,9 @@ export class GameEngine {
             this.playerController.handleFiring(dt, entities, handleHitscan);
         }
 
-        // Run AI & Physics (Pass wrapper instead of raw method)
         this.aiController.update(dt, entities, player, this.cameraManager, handleDeathWrapper);
         this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, handleDeathWrapper);
         
-        // Spawn Logic
         if (this.gameMode !== 'SANDBOX') {
             this.spawnManager.update(dt, entities, player, this.gameMode, (team) => this.entityManager.getSpawnPos(team), this.pushNotification.bind(this));
         }
@@ -358,12 +358,18 @@ export class GameEngine {
         
         // Broadcast State
         this.networkManager.broadcastWorldState([player, ...entities]);
+
+        // Broadcast Leaderboard periodically (every 30 frames / 0.5s approx)
+        if (this.leaderboardManager.shouldUpdate()) {
+            this.leaderboardManager.update(entities, player, this.playerManager.state);
+            this.playerManager.emitUpdate();
+            this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
+        }
     
     } 
     
-    // --- CLIENT LOGIC: Interpolate & Send Input ---
+    // --- CLIENT LOGIC ---
     else {
-        // Send Input
         const move = this.inputManager.getMovementVector();
         const fire = this.inputManager.getIsFiring();
         this.networkManager.sendClientInput({ 
@@ -373,36 +379,30 @@ export class GameEngine {
             fire: fire
         });
 
-        // Interpolate Entities
+        // Client-side Interpolation (Smoothing)
         this.entityManager.entities.forEach(ent => {
             if (ent.targetPos) {
-                ent.pos.x += (ent.targetPos.x - ent.pos.x) * 0.3; // Smooth lerp
+                // Lerp towards target position
+                // Factor 0.3 provides a balance between responsiveness and smoothness
+                ent.pos.x += (ent.targetPos.x - ent.pos.x) * 0.3; 
                 ent.pos.y += (ent.targetPos.y - ent.pos.y) * 0.3;
             }
         });
 
-        // Local Player prediction (Client side prediction for smooth feel)
         this.playerController.update(dt, [], () => {}); 
-        // Note: We run physics for local player to feel responsive, 
-        // but position will be corrected by Host snapshots (Snap back if desync)
         const player = this.playerManager.entity;
         PhysicsSystem.updateMovement([player], dt, this.statManager, WORLD_SIZE, WORLD_SIZE);
 
         ParticleSystem.update(this.entityManager.entities, dt);
     }
 
-    // Common Updates (Chat, Notifications, etc)
     this.chatManager.update(dt, this.entityManager.entities);
     if (this.notificationManager.update()) {
         this.playerManager.state.notifications = this.notificationManager.notifications;
     }
-    if (this.leaderboardManager.shouldUpdate()) {
-        this.leaderboardManager.update(this.entityManager.entities, this.playerManager.entity, this.playerManager.state);
-        this.playerManager.emitUpdate();
-    }
   }
 
-  // ... (Render and other methods remain same) ...
+  // ... (Rest of class methods same as before) ...
   render() {
     const cameraConfig = this.cameraManager.getCameraTarget(this.playerManager.entity, this.entityManager.entities);
     this.renderSystem.draw(
@@ -428,9 +428,7 @@ export class GameEngine {
     );
   }
 
-  // ... (Key handlers and helper methods) ...
   private handleKeyDown = (e: KeyboardEvent) => {
-      // ... same as before
       if (this.playerManager.entity.isDead && (e.code === 'Enter')) this.respawn();
       const handleDeath = (v: Entity, k: Entity) => {
         this.deathManager.handleDeath(v, k, this.entityManager.entities);

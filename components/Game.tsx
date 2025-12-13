@@ -18,7 +18,7 @@ import { PlayerHub } from './PlayerHub';
 import { Minimap } from './Minimap'; 
 import { IngameOverlay } from './IngameOverlay'; 
 import { LoadingScreen } from './LoadingScreen';
-import { Copy } from 'lucide-react';
+import { Copy, Wifi } from 'lucide-react';
 
 const initialPlayerState: PlayerState = {
     level: 1, xp: 0, xpToNext: 100, score: 0, availablePoints: 0,
@@ -50,7 +50,6 @@ export const Game: React.FC = () => {
   const [isMobile, setIsMobile] = useState(false);
   const [spectatingName, setSpectatingName] = useState("Unknown");
 
-  // NEW: Network Stats State
   const [netStats, setNetStats] = useState({ ping: 0, players: 1 });
 
   useEffect(() => {
@@ -98,7 +97,6 @@ export const Game: React.FC = () => {
             );
             newEngine.audioManager.ctx.resume();
             
-            // --- BIND REAL NETWORK STATS ---
             newEngine.networkManager.on('net_stat', (stats) => {
                 setNetStats(prev => ({
                     ping: stats.ping,
@@ -126,7 +124,6 @@ export const Game: React.FC = () => {
     return () => { if (engineRef.current) engineRef.current.destroy(); };
   }, [gameState, gameMode]); 
 
-  // ... (Other handlers unchanged) ...
   const updateSettings = (newSettings: GameSettings) => { setSettings(newSettings); engineRef.current?.updateSettings(newSettings); };
   const handleUpgrade = (key: StatKey) => engineRef.current?.upgradeStat(key);
   const handleEvolve = (className: string) => engineRef.current?.evolve(className);
@@ -158,24 +155,24 @@ export const Game: React.FC = () => {
         <>
             <canvas ref={canvasRef} className="block w-full h-full outline-none touch-none" tabIndex={0} />
             
-            {/* REAL NET STATS DISPLAY */}
-            <div className="absolute top-2 left-2 z-20 flex flex-col gap-1 pointer-events-none">
+            {/* NET STATS DISPLAY - Moved to Top Right to avoid Upgrade Menu */}
+            <div className="absolute top-2 right-2 md:right-auto md:left-[280px] z-20 flex gap-2 pointer-events-none">
                 <div className="bg-black/60 px-3 py-1 rounded text-[10px] font-mono font-bold text-green-400 flex items-center gap-2 border border-green-900/50">
-                    <span className={`w-2 h-2 rounded-full ${netStats.ping < 100 ? 'bg-green-500' : 'bg-yellow-500'} animate-pulse`}></span>
-                    <span>PING: {isHost ? 'HOST' : `${netStats.ping}ms`}</span>
+                    <Wifi size={12} className={netStats.ping < 100 ? 'text-green-500' : 'text-yellow-500'} />
+                    <span>{isHost ? 'HOST' : `${netStats.ping}ms`}</span>
                 </div>
                 {isHost && (
                     <div className="bg-black/60 px-3 py-1 rounded text-[10px] font-mono font-bold text-cyan-400 border border-cyan-900/50">
-                        👥 PLAYERS: {netStats.players}
+                        👥 {netStats.players}
                     </div>
                 )}
             </div>
 
             {isHost && myRoomId && (
-                <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-black/60 backdrop-blur px-4 py-2 rounded-full border border-green-500/50 shadow-lg pointer-events-auto">
-                    <span className="text-[10px] font-bold text-green-400 uppercase tracking-widest">Room ID:</span>
-                    <span className="font-mono font-bold text-white select-all">{myRoomId}</span>
-                    <button onClick={() => { navigator.clipboard.writeText(myRoomId); alert("Copied!"); }} className="p-1 hover:text-green-300 text-slate-400 transition-colors"><Copy size={14} /></button>
+                <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-black/60 backdrop-blur px-4 py-2 rounded-full border border-green-500/50 shadow-lg pointer-events-auto hover:bg-black/80 transition-colors">
+                    <span className="text-[10px] font-bold text-green-400 uppercase tracking-widest">ID:</span>
+                    <span className="font-mono font-bold text-white select-all text-xs">{myRoomId}</span>
+                    <button onClick={() => { navigator.clipboard.writeText(myRoomId); alert("Copied!"); }} className="p-1 hover:text-green-300 text-slate-400 transition-colors"><Copy size={12} /></button>
                 </div>
             )}
 

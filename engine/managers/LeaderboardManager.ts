@@ -4,6 +4,7 @@ import { TANK_CLASSES } from '../../data/tanks';
 
 export class LeaderboardManager {
     lastUpdate: number = 0;
+    currentLeaderboard: LeaderboardEntry[] = []; // Store it locally
 
     shouldUpdate(): boolean {
         const now = Date.now();
@@ -12,6 +13,10 @@ export class LeaderboardManager {
             return true;
         }
         return false;
+    }
+
+    getLatest() {
+        return this.currentLeaderboard;
     }
 
     update(entities: Entity[], player: Entity, playerState: PlayerState) {
@@ -24,7 +29,7 @@ export class LeaderboardManager {
                     id: e.id,
                     name: e.name || 'Player',
                     score: e.scoreValue || 0,
-                    tankClass: TANK_CLASSES[e.classPath || 'basic'].name,
+                    tankClass: TANK_CLASSES[e.classPath || 'basic']?.name || 'Tank',
                     teamId: e.teamId,
                     isPlayer: false
                 });
@@ -37,7 +42,7 @@ export class LeaderboardManager {
                 id: 'player',
                 name: player.name || 'Player',
                 score: playerState.score,
-                tankClass: TANK_CLASSES[playerState.classPath].name,
+                tankClass: TANK_CLASSES[playerState.classPath]?.name || 'Tank',
                 teamId: player.teamId,
                 isPlayer: true
             });
@@ -50,7 +55,7 @@ export class LeaderboardManager {
                     id: e.id,
                     name: e.name || 'An unnamed tank',
                     score: e.scoreValue,
-                    tankClass: e.classPath ? TANK_CLASSES[e.classPath].name : 'Tank',
+                    tankClass: e.classPath ? (TANK_CLASSES[e.classPath]?.name || 'Tank') : 'Tank',
                     teamId: e.teamId,
                     isPlayer: false
                 });
@@ -58,7 +63,8 @@ export class LeaderboardManager {
         });
 
         candidates.sort((a, b) => b.score - a.score);
-        playerState.leaderboard = candidates.slice(0, 10);
+        this.currentLeaderboard = candidates.slice(0, 10);
+        playerState.leaderboard = this.currentLeaderboard;
 
         if (candidates.length > 0) {
             const leader = candidates[0];
