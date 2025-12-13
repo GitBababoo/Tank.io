@@ -18,7 +18,7 @@ import { PlayerHub } from './PlayerHub';
 import { Minimap } from './Minimap'; 
 import { IngameOverlay } from './IngameOverlay'; 
 import { LoadingScreen } from './LoadingScreen';
-import { Copy, Wifi } from 'lucide-react';
+import { Copy, Wifi, Activity } from 'lucide-react';
 
 const initialPlayerState: PlayerState = {
     level: 1, xp: 0, xpToNext: 100, score: 0, availablePoints: 0,
@@ -26,6 +26,29 @@ const initialPlayerState: PlayerState = {
     stats: { regen: 0, maxHp: 0, bodyDmg: 0, bulletSpd: 0, bulletPen: 0, bulletDmg: 0, reload: 0, moveSpd: 0, critChance: 0, critDamage: 0 },
     maxLevel: 1, abilityCooldown: 0, statsTracker: { damageDealt: 0, shapesDestroyed: 0, timeAlive: 0, bossKills: 0, playerKills: 0 },
     notifications: [], leaderboard: [], faction: FactionType.NONE, health: BASE_STATS.maxHp, maxHealth: BASE_STATS.maxHp
+};
+
+// --- NEW DEBUG OVERLAY COMPONENT ---
+const DebugOverlay: React.FC<{ stats: any }> = ({ stats }) => {
+    if (!stats) return null;
+    return (
+        <div className="absolute top-0 left-0 bg-black/80 text-green-400 font-mono text-[10px] p-2 z-[200] border-b border-r border-green-700 shadow-xl pointer-events-none select-none">
+            <h3 className="font-bold border-b border-green-800 mb-1 text-xs">DEVELOPER CONSOLE (F2)</h3>
+            <div className="grid grid-cols-2 gap-x-4">
+                <div>FPS: <span className="text-white">{stats.fps}</span></div>
+                <div>PING: <span className={stats.ping > 100 ? "text-red-500" : "text-white"}>{stats.ping}ms</span></div>
+                <div>RTT: <span className="text-white">{stats.rtt}ms</span></div>
+                <div>ROLE: <span className="text-yellow-400">{stats.isHost ? 'HOST' : 'CLIENT'}</span></div>
+                <div>ENTITIES: <span className="text-white">{stats.entities}</span></div>
+                <div>ROOM: <span className="text-white">{stats.room}</span></div>
+                <div>POS: <span className="text-slate-400">{Math.round(stats.pos.x)}, {Math.round(stats.pos.y)}</span></div>
+            </div>
+            <div className="mt-1 border-t border-green-800 pt-1">
+                <div>NET IN: {stats.packetsIn} pkts / {(stats.bandwidthIn/1024).toFixed(1)} KB</div>
+                <div>NET OUT: {stats.packetsOut} pkts</div>
+            </div>
+        </div>
+    );
 };
 
 export const Game: React.FC = () => {
@@ -51,6 +74,7 @@ export const Game: React.FC = () => {
   const [spectatingName, setSpectatingName] = useState("Unknown");
 
   const [netStats, setNetStats] = useState({ ping: 0, players: 1 });
+  const [debugStats, setDebugStats] = useState<any>(null); // NEW
 
   useEffect(() => {
       const checkMobile = () => {
@@ -93,6 +117,7 @@ export const Game: React.FC = () => {
             const newEngine = new GameEngine(
                 canvasRef.current, settings, gameMode, playerName, faction, initialClass,
                 (newState) => setPlayerState(newState),
+                (debugData) => setDebugStats(debugData), // Handle F2 debug data
                 minimapRef.current 
             );
             newEngine.audioManager.ctx.resume();
@@ -155,8 +180,10 @@ export const Game: React.FC = () => {
         <>
             <canvas ref={canvasRef} className="block w-full h-full outline-none touch-none" tabIndex={0} />
             
-            {/* NET STATS DISPLAY - Moved to Top Right to avoid Upgrade Menu overlap */}
-            {/* Added md:left-[280px] to accommodate leaderboard if necessary, or just put top-right */}
+            {/* NEW: F2 Debug Panel */}
+            <DebugOverlay stats={debugStats} />
+
+            {/* NET STATS DISPLAY - Top Right */}
             <div className="absolute top-2 right-2 flex gap-2 pointer-events-none z-20">
                 <div className="bg-black/60 px-3 py-1 rounded text-[10px] font-mono font-bold text-green-400 flex items-center gap-2 border border-green-900/50">
                     <Wifi size={12} className={netStats.ping < 100 ? 'text-green-500' : 'text-yellow-500'} />

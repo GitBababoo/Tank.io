@@ -63,9 +63,11 @@ export class GameEngine {
   worldController: WorldController;
   
   onUpdateStats: (stats: PlayerState) => void;
+  onDebugUpdate: (stats: any) => void; // NEW: Debug Callback
   isDestroyed: boolean = false;
+  isDebugMode: boolean = false; // NEW: Toggle state
 
-  // Smoothing Variables
+  // Interpolation & Prediction
   private serverReconciliationPosition: Vector2 | null = null;
 
   constructor(
@@ -76,12 +78,14 @@ export class GameEngine {
       faction: FactionType,
       initialClass: string,
       onUpdateStats: (stats: PlayerState) => void,
+      onDebugUpdate: (stats: any) => void,
       minimapCanvas: HTMLCanvasElement | null 
     ) {
     this.canvas = canvas;
     this.settings = settings;
     this.gameMode = gameMode;
     this.onUpdateStats = onUpdateStats;
+    this.onDebugUpdate = onDebugUpdate;
     
     this.renderSystem = new RenderSystem(canvas);
     this.minimapSystem = new MinimapSystem(); 
@@ -124,9 +128,7 @@ export class GameEngine {
         this.playerManager.evolve(initialClass);
     }
     
-    // Generate Map Walls (Both Host and Client need this for prediction)
     MapSystem.generateMap(this.entityManager.entities, this.gameMode);
-    
     this.playerManager.entity.pos = this.entityManager.getSpawnPos(playerTeam);
 
     this.deathManager = new DeathManager(
@@ -191,14 +193,13 @@ export class GameEngine {
   }
 
   bindNetworkEvents() {
-    // --- HOST EVENTS ---
+    // --- HOST LOGIC ---
     this.networkManager.on('player_joined', (data) => {
         if (this.isDestroyed || !this.networkManager.isHost) return;
         
         console.log(`[NET] Player Joined: ${data.name}`);
         const spawnPos = this.entityManager.getSpawnPos();
 
-        // Create remote player entity on Host
         const newPlayer: Entity = {
             id: data.id,
             name: data.name,
@@ -212,14 +213,13 @@ export class GameEngine {
             teamId: undefined, 
             classPath: data.tank || 'basic',
             scoreValue: 0,
-            // Add input state storage
             // @ts-ignore
             remoteInput: { x: 0, y: 0, fire: false, r: 0 } 
         };
         this.entityManager.add(newPlayer);
         this.notificationManager.push(`${data.name} joined.`, 'info');
         
-        // Immediate Leaderboard Sync
+        // Initial Sync
         this.leaderboardManager.update(this.entityManager.entities, this.playerManager.entity, this.playerManager.state);
         this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
     });
@@ -228,12 +228,11 @@ export class GameEngine {
         if (!this.networkManager.isHost) return;
         const entity = this.entityManager.entities.find(e => e.id === data.id);
         if (entity && !entity.isDead) {
-            // Store input for processing in update loop
             (entity as any).remoteInput = data;
         }
     });
 
-    // --- CLIENT EVENTS ---
+    // --- CLIENT LOGIC ---
     this.networkManager.on('world_update', (snapshot: any[]) => {
         if (this.networkManager.isHost) return;
 
@@ -243,25 +242,23 @@ export class GameEngine {
             serverIds.add(remote.id);
 
             if (remote.id === this.networkManager.myId) {
-                // SERVER RECONCILIATION FOR LOCAL PLAYER
-                // Instead of snapping directly, we store the server position
-                // and smoothly correct our local prediction towards it.
+                // Client-Side Prediction Reconciliation
+                // If local position drifts too far from server, snap or lerp back
                 this.serverReconciliationPosition = { x: remote.x, y: remote.y };
                 
-                // Sync critical stats
+                // Sync Vital Stats
                 this.playerManager.entity.health = remote.h;
                 this.playerManager.state.score = remote.s || 0;
             } else {
-                // OTHER ENTITIES
+                // Smooth Interpolation for Remote Entities
                 let ent = this.entityManager.entities.find(e => e.id === remote.id);
                 if (!ent) {
-                    // Create new entity
                     ent = {
                         id: remote.id,
                         type: remote.t,
                         pos: { x: remote.x, y: remote.y },
                         vel: { x: 0, y: 0 },
-                        radius: 20, // Default, corrected by classPath usually
+                        radius: 20, 
                         rotation: remote.r,
                         color: remote.c || '#fff',
                         health: remote.h,
@@ -271,27 +268,25 @@ export class GameEngine {
                         name: remote.n,
                         classPath: remote.cp,
                         teamId: remote.ti,
-                        targetPos: { x: remote.x, y: remote.y } // Init target
+                        targetPos: { x: remote.x, y: remote.y }
                     };
                     this.entityManager.add(ent);
                 } else {
-                    // Update Interpolation Target
                     ent.targetPos = { x: remote.x, y: remote.y };
                     
-                    // Smooth Rotation (Handle 360 wrap-around)
+                    // Smooth Rotation
                     let diff = remote.r - ent.rotation;
                     while (diff < -Math.PI) diff += Math.PI * 2;
                     while (diff > Math.PI) diff -= Math.PI * 2;
-                    ent.rotation += diff * 0.5; // Soft turn
+                    ent.rotation += diff * 0.5;
 
                     ent.health = remote.h;
-                    ent.classPath = remote.cp; // Update class if changed
+                    ent.classPath = remote.cp;
                 }
             }
         });
         
-        // Remove entities that are no longer in the snapshot
-        // (Except local particles/effects/walls)
+        // Cleanup ghosts
         this.entityManager.entities = this.entityManager.entities.filter(e => {
             if (e.type === EntityType.PARTICLE || e.type === EntityType.FLOATING_TEXT) return true;
             if (e.type === EntityType.WALL || e.type === EntityType.ZONE) return true;
@@ -299,10 +294,11 @@ export class GameEngine {
         });
     });
 
+    // CRITICAL: Leaderboard Sync
     this.networkManager.on('leaderboard_update', (data) => {
         if (!this.networkManager.isHost) {
             this.playerManager.state.leaderboard = data;
-            // Leader arrow logic
+            
             if (data.length > 0 && !data[0].isPlayer) {
                 const leaderEnt = this.entityManager.entities.find(e => e.id === data[0].id);
                 this.playerManager.state.leaderPos = leaderEnt ? leaderEnt.pos : undefined;
@@ -324,7 +320,6 @@ export class GameEngine {
 
     this.networkManager.on('chat_message', (data) => {
         this.chatManager.addMessage(data.sender, data.content);
-        // Spawn floating text above player if found
         const speaker = this.entityManager.entities.find(e => e.name === data.sender) || (data.sender === this.playerManager.entity.name ? this.playerManager.entity : null);
         if (speaker) {
             PhysicsSystem.spawnFloatingText(this.entityManager.entities, speaker.pos, data.content, '#fff');
@@ -335,7 +330,7 @@ export class GameEngine {
   update(dt: number) {
     if (this.isDestroyed) return;
     
-    // --- HOST LOGIC (AUTHORITATIVE) ---
+    // --- HOST LOGIC ---
     if (this.networkManager.isHost) {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
@@ -344,27 +339,19 @@ export class GameEngine {
             this.deathManager.handleDeath(v, k, entities);
         };
 
-        // 1. Process Remote Inputs
+        // Process Remote Input
         entities.forEach(ent => {
             if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
                 const input = (ent as any).remoteInput;
                 const speed = this.statManager.getStat(ent, 'moveSpd') * 60;
                 
-                // Simple Physics for Remote Players on Host
+                // Simple Physics
                 ent.vel.x += input.x * speed * dt * 5; 
                 ent.vel.y += input.y * speed * dt * 5;
-                ent.rotation = input.r; // Trust rotation
-                
-                // Handle Firing (Basic)
-                if (input.fire) {
-                    // Logic to fire weapon for remote player
-                    // Needs refactoring WeaponSystem to accept external input state, 
-                    // but for now we assume they can fire.
-                }
+                ent.rotation = input.r; 
             }
         });
 
-        // 2. Game Loop
         this.playerManager.update(dt);
         this.playerController.update(dt, entities, this.pushNotification.bind(this));
         
@@ -384,9 +371,10 @@ export class GameEngine {
 
         ParticleSystem.update(entities, dt);
         
-        // 3. Broadcast
+        // Broadcast
         this.networkManager.broadcastWorldState([player, ...entities]);
 
+        // Leaderboard (Low Freq)
         if (this.leaderboardManager.shouldUpdate()) {
             this.leaderboardManager.update(entities, player, this.playerManager.state);
             this.playerManager.emitUpdate();
@@ -395,9 +383,8 @@ export class GameEngine {
     
     } 
     
-    // --- CLIENT LOGIC (PREDICTION & INTERPOLATION) ---
+    // --- CLIENT LOGIC ---
     else {
-        // 1. Send Input
         const move = this.inputManager.getMovementVector();
         const fire = this.inputManager.getIsFiring();
         this.networkManager.sendClientInput({ 
@@ -407,43 +394,36 @@ export class GameEngine {
             fire: fire
         });
 
-        // 2. Client-Side Prediction (Local Player)
-        // We run the physics locally so it feels instant
+        // Client-Side Prediction (Run local physics)
         this.playerController.update(dt, [], () => {}); 
         const player = this.playerManager.entity;
         
-        // Physics update for player
         PhysicsSystem.updateMovement([player], dt, this.statManager, WORLD_SIZE, WORLD_SIZE);
 
-        // Reconciliation: Smoothly correct if we drifted from server
+        // Reconciliation
         if (this.serverReconciliationPosition) {
             const dx = this.serverReconciliationPosition.x - player.pos.x;
             const dy = this.serverReconciliationPosition.y - player.pos.y;
             const dist = Math.hypot(dx, dy);
 
-            if (dist > 100) {
-                // Too far? Teleport (Snap)
+            if (dist > 100) { // Teleport if too far
                 player.pos.x = this.serverReconciliationPosition.x;
                 player.pos.y = this.serverReconciliationPosition.y;
-            } else if (dist > 5) {
-                // Drift? Smoothly lerp back (10% per frame)
+            } else if (dist > 5) { // Lerp if small drift
                 player.pos.x += dx * 0.1;
                 player.pos.y += dy * 0.1;
             }
-            this.serverReconciliationPosition = null; // Consumed
+            this.serverReconciliationPosition = null;
         }
 
-        // 3. Interpolation (Other Entities)
+        // Interpolation for others
         this.entityManager.entities.forEach(ent => {
             if (ent.targetPos) {
-                // Smoothly slide towards the server position
-                // 0.3 factor is a good balance between smoothness and responsiveness for 60fps
                 ent.pos.x += (ent.targetPos.x - ent.pos.x) * 0.3; 
                 ent.pos.y += (ent.targetPos.y - ent.pos.y) * 0.3;
             }
         });
 
-        // 4. Client-side Visuals
         ParticleSystem.update(this.entityManager.entities, dt);
     }
 
@@ -451,9 +431,25 @@ export class GameEngine {
     if (this.notificationManager.update()) {
         this.playerManager.state.notifications = this.notificationManager.notifications;
     }
+
+    // --- DEBUG DATA EXPORT ---
+    if (this.isDebugMode) {
+        this.onDebugUpdate({
+            fps: Math.round(this.renderSystem.currentFps),
+            ping: this.networkManager.stats.ping,
+            rtt: this.networkManager.stats.rtt,
+            entities: this.entityManager.entities.length + 1,
+            pos: this.playerManager.entity.pos,
+            packetsIn: this.networkManager.stats.packetsIn,
+            packetsOut: this.networkManager.stats.packetsOut,
+            bandwidthIn: this.networkManager.stats.bytesIn,
+            isHost: this.networkManager.isHost,
+            room: this.gameMode
+        });
+    }
   }
 
-  // ... (Render and Input handlers remain the same) ...
+  // ... (Render and other methods remain) ...
   render() {
     const cameraConfig = this.cameraManager.getCameraTarget(this.playerManager.entity, this.entityManager.entities);
     this.renderSystem.draw(
@@ -480,6 +476,14 @@ export class GameEngine {
   }
 
   private handleKeyDown = (e: KeyboardEvent) => {
+      // NEW: F2 Debug Toggle
+      if (e.code === 'F2') {
+          this.isDebugMode = !this.isDebugMode;
+          this.pushNotification(`Developer Mode: ${this.isDebugMode ? 'ON' : 'OFF'}`);
+          // Clear debug view if turning off
+          if (!this.isDebugMode) this.onDebugUpdate(null); 
+      }
+
       if (this.playerManager.entity.isDead && (e.code === 'Enter')) this.respawn();
       const handleDeath = (v: Entity, k: Entity) => {
         this.deathManager.handleDeath(v, k, this.entityManager.entities);

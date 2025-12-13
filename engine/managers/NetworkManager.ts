@@ -4,13 +4,14 @@ import Peer, { DataConnection } from 'peerjs';
 
 type NetworkEventHandler = (data: any) => void;
 
+// --- PROTOCOL Opcodes (Minimize bandwidth) ---
 const OP_JOIN = 1;
-const OP_UPDATE = 2; 
-const OP_INPUT = 3;  
+const OP_UPDATE = 2; // World State (High Frequency)
+const OP_INPUT = 3;  // Player Input
 const OP_CHAT = 4;
 const OP_PING = 5;
 const OP_PONG = 6;
-const OP_LEADERBOARD = 7; 
+const OP_LEADERBOARD = 7; // NEW: Dedicated Leaderboard Channel
 
 export class NetworkManager {
     private handlers: Record<string, NetworkEventHandler[]> = {};
@@ -22,11 +23,25 @@ export class NetworkManager {
     private connections: DataConnection[] = []; 
     private hostConn: DataConnection | null = null;
 
-    public latency: number = 0;
-    public connectedPeers: number = 0;
+    // --- DEBUG STATS ---
+    public stats = {
+        ping: 0,
+        rtt: 0,
+        packetsIn: 0,
+        packetsOut: 0,
+        bytesIn: 0,
+        bytesOut: 0,
+        lastUpdate: Date.now()
+    };
 
     constructor() {
+        // Ping every second
         setInterval(() => this.measurePing(), 1000);
+        // Reset counters every second
+        setInterval(() => {
+            this.stats.packetsIn = 0; this.stats.packetsOut = 0;
+            this.stats.bytesIn = 0; this.stats.bytesOut = 0;
+        }, 1000);
     }
 
     async hostGame(playerInfo: { name: string; mode: GameMode }) {
@@ -37,7 +52,7 @@ export class NetworkManager {
         return new Promise<string>((resolve, reject) => {
             this.peer!.on('open', (id) => {
                 this.myId = id;
-                console.log(`[NET] Hosting Room: ${id}`);
+                console.log(`[NET] HOST STARTED: ${id}`);
                 this.emit('connected', { isHost: true, id: this.myId });
                 resolve(id);
             });
@@ -57,6 +72,7 @@ export class NetworkManager {
         return new Promise<void>((resolve, reject) => {
             this.peer!.on('open', (id) => {
                 this.myId = id;
+                console.log(`[NET] CONNECTING TO: ${hostId}`);
                 const conn = this.peer!.connect(hostId, { reliable: true });
                 
                 conn.on('open', () => {
@@ -77,7 +93,7 @@ export class NetworkManager {
                 });
 
                 conn.on('data', (data) => this.handleClientMessage(data));
-                conn.on('close', () => { this.isConnected = false; alert("Host Disconnected"); });
+                conn.on('close', () => { this.isConnected = false; this.emit('disconnected', {}); alert("Host Disconnected"); });
                 conn.on('error', (err) => reject(err));
             });
         });
@@ -88,6 +104,7 @@ export class NetworkManager {
         this.updatePeerCount();
 
         conn.on('data', (raw: any) => {
+            this.trackStats(raw, true);
             if (raw.op === OP_JOIN) {
                 this.emit('player_joined', { id: conn.peer, ...raw.data });
             } else if (raw.op === OP_INPUT) {
@@ -108,31 +125,45 @@ export class NetworkManager {
     }
 
     private updatePeerCount() {
-        this.connectedPeers = this.connections.length;
-        this.emit('net_stat', { players: this.connectedPeers + 1, ping: 0 });
+        this.emit('net_stat', { players: this.connections.length + 1, ping: 0 });
     }
 
     private handleClientMessage(raw: any) {
+        this.trackStats(raw, true);
+        
         if (raw.op === OP_UPDATE) {
             this.emit('world_update', raw.data);
         } else if (raw.op === OP_LEADERBOARD) {
+            // CRITICAL FIX: Explicit Leaderboard Handler
             this.emit('leaderboard_update', raw.data);
         } else if (raw.op === OP_CHAT) {
             this.emit('chat_message', raw.data);
         } else if (raw.op === OP_PONG) {
             const now = Date.now();
-            this.latency = now - raw.t;
-            this.emit('net_stat', { players: -1, ping: this.latency });
+            this.stats.rtt = now - raw.t;
+            this.stats.ping = Math.floor(this.stats.rtt / 2);
+            this.emit('net_stat', { players: -1, ping: this.stats.ping });
         }
     }
 
     private measurePing() {
         if (this.isHost) {
-            this.latency = 0;
+            this.stats.ping = 0;
             this.emit('net_stat', { players: this.connections.length + 1, ping: 0 });
         } else if (this.hostConn?.open) {
             const t = Date.now();
-            this.hostConn.send({ op: OP_PING, t: t });
+            this.send({ op: OP_PING, t: t });
+        }
+    }
+
+    private trackStats(data: any, incoming: boolean) {
+        const size = JSON.stringify(data).length * 2; // Approx bytes
+        if (incoming) {
+            this.stats.packetsIn++;
+            this.stats.bytesIn += size;
+        } else {
+            this.stats.packetsOut++;
+            this.stats.bytesOut += size;
         }
     }
 
@@ -141,7 +172,7 @@ export class NetworkManager {
     public broadcastWorldState(entities: Entity[]) {
         if (!this.isHost || this.connections.length === 0) return;
         
-        // OPTIMIZATION: Round coordinates to reduce packet size
+        // OPTIMIZATION: Rounding to reduce JSON size
         const snapshot = entities.map(e => ({
             id: e.id,
             t: e.type,
@@ -165,11 +196,19 @@ export class NetworkManager {
     }
 
     private broadcast(msg: any) {
+        this.trackStats(msg, false);
         this.connections.forEach(c => { if (c.open) c.send(msg); });
     }
 
+    private send(msg: any) {
+        if (this.hostConn?.open) {
+            this.trackStats(msg, false);
+            this.hostConn.send(msg);
+        }
+    }
+
     public sendClientInput(input: any) {
-        if (this.hostConn?.open) this.hostConn.send({ op: OP_INPUT, data: input });
+        this.send({ op: OP_INPUT, data: input });
     }
 
     public sendChat(message: string, sender: string) {
@@ -177,8 +216,8 @@ export class NetworkManager {
         if (this.isHost) {
             this.broadcast({ op: OP_CHAT, data: payload });
             this.emit('chat_message', payload);
-        } else if (this.hostConn?.open) {
-            this.hostConn.send({ op: OP_CHAT, data: payload });
+        } else {
+            this.send({ op: OP_CHAT, data: payload });
         }
     }
 
