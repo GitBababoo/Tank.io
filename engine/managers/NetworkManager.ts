@@ -1,214 +1,251 @@
 
-import Peer, { DataConnection } from 'peerjs';
-import { Entity, GameMode, FactionType } from '../../types';
+import { Entity, GameMode, EntityType } from '../../types';
 
-// Protocol Opcodes
-const OP = {
-    JOIN_REQ: 1,
-    JOIN_ACK: 2,
-    WORLD_STATE: 3, // Full state (High bandwidth, rare)
-    WORLD_DELTA: 4, // Changes only (Low bandwidth, frequent)
-    INPUT: 5,
-    CHAT: 6,
-    PING: 7,
-    PONG: 8,
-    LEADERBOARD: 9,
-    EVENT: 10 // Sound/Particles
-};
+// Protocol Tags (Must match Server)
+const MSG_INPUT = 1;
+const MSG_WORLD_UPDATE = 2;
+const MSG_JOIN = 3;
+const MSG_INIT = 4;
 
 export class NetworkManager {
-    public isHost: boolean = false;
+    public isConnected: boolean = false;
+    public isHost: boolean = false; // Deprecated concept in Client-Server, but kept for compatibility
     public myId: string | null = null;
-    public connections: Map<string, DataConnection> = new Map();
-    private hostConn: DataConnection | null = null;
-    private handlers: Record<string, Function[]> = {};
     
-    // Snapshot Buffer for Interpolation
-    public snapshots: any[] = [];
+    private ws: WebSocket | null = null;
+    
+    // --- SNAPSHOT INTERPOLATION ---
+    // Stores the last 20 updates from server to smooth out movement
+    public snapshots: { time: number, entities: any[] }[] = [];
     public serverTimeOffset: number = 0;
+    public renderDelay: number = 100; // 100ms buffer for smooth lerping
 
-    // Stats
+    // Event Handlers
+    private handlers: Record<string, Function[]> = {};
+
     public stats = { ping: 0, rtt: 0, packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0 };
 
     constructor() {
-        setInterval(() => this.resetStats(), 1000);
         setInterval(() => this.measurePing(), 1000);
     }
 
-    private resetStats() {
-        this.stats.packetsIn = 0; this.stats.packetsOut = 0;
-        this.stats.bytesIn = 0; this.stats.bytesOut = 0;
-    }
-
-    // --- HOSTING ---
-    async hostGame(info: { name: string, mode: GameMode }): Promise<string> {
-        this.isHost = true;
-        const peer = new Peer();
-        
-        return new Promise((resolve, reject) => {
-            peer.on('open', (id) => {
-                this.myId = id;
-                console.log(`[NET] HOST STARTED: ${id}`);
-                resolve(id);
-            });
-            peer.on('connection', (conn) => this.handleIncoming(conn));
-            peer.on('error', reject);
-        });
-    }
-
-    // --- JOINING ---
+    // --- CONNECT ---
     async joinGame(hostId: string, playerInfo: any): Promise<void> {
-        this.isHost = false;
-        const peer = new Peer();
-
         return new Promise((resolve, reject) => {
-            peer.on('open', (id) => {
-                this.myId = id;
-                const conn = peer.connect(hostId, { reliable: true });
-                conn.on('open', () => {
-                    this.hostConn = conn;
-                    this.send(OP.JOIN_REQ, { ...playerInfo, id });
-                    resolve();
-                });
-                conn.on('data', (data) => this.processMessage(data));
-                conn.on('close', () => this.emit('disconnected', null));
-                conn.on('error', reject);
-            });
+            // Determine Server URL (Localhost or Production)
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.hostname;
+            const port = '8080'; // Explicit port for dev
+            const url = `${protocol}//${host}:${port}/ws?uid=${playerInfo.id || 'guest'}&name=${playerInfo.name}`;
+
+            console.log(`[NET] Connecting to Middleman: ${url}`);
+            
+            this.ws = new WebSocket(url);
+            this.ws.binaryType = 'arraybuffer';
+
+            this.ws.onopen = () => {
+                this.isConnected = true;
+                this.isHost = false; // Server is always host
+                console.log("[NET] WebSocket Connected!");
+                
+                // Send Join Request
+                this.sendJson({ t: 'join', d: { room: 'FFA', ...playerInfo } });
+                resolve();
+            };
+
+            this.ws.onmessage = (event) => {
+                this.handleMessage(event.data);
+            };
+
+            this.ws.onclose = () => {
+                this.isConnected = false;
+                this.emit('disconnected', null);
+                console.log("[NET] Disconnected from Server");
+            };
+
+            this.ws.onerror = (err) => {
+                console.error("[NET] WebSocket Error", err);
+                reject(err);
+            };
         });
     }
 
-    private send(op: number, data: any) {
-        if (this.hostConn && this.hostConn.open) {
-            this.hostConn.send([op, data, Date.now()]);
-        }
-    }
-
-    // --- MESSAGE HANDLING ---
-    private handleIncoming(conn: DataConnection) {
-        this.connections.set(conn.peer, conn);
-        conn.on('data', (data) => {
-            this.processMessage(data, conn.peer);
-        });
-        conn.on('close', () => {
-            this.connections.delete(conn.peer);
-            this.emit('player_left', { id: conn.peer });
-        });
-    }
-
-    private processMessage(raw: any, senderId?: string) {
-        // Simple packet structure: [OP, Payload, Timestamp]
-        const [op, data, ts] = raw;
-        this.stats.packetsIn++;
-        this.stats.bytesIn += JSON.stringify(raw).length; // Approx
-
-        switch (op) {
-            case OP.JOIN_REQ:
-                this.emit('player_joined', { ...data, id: senderId });
-                break;
-            case OP.JOIN_ACK:
-                // We are accepted, data contains initial world state
-                this.emit('connected', data);
-                break;
-            case OP.WORLD_STATE:
-                // Push to snapshot buffer
-                this.snapshots.push({ time: Date.now(), entities: data });
-                if (this.snapshots.length > 20) this.snapshots.shift(); // Keep buffer small
-                break;
-            case OP.INPUT:
-                this.emit('remote_input', { id: senderId, ...data });
-                break;
-            case OP.PING:
-                if (this.isHost && senderId) {
-                    const conn = this.connections.get(senderId);
-                    if (conn) conn.send([OP.PONG, null, ts]);
-                }
-                break;
-            case OP.PONG:
-                this.stats.rtt = Date.now() - ts;
-                this.stats.ping = Math.floor(this.stats.rtt / 2);
-                this.emit('net_stat', { ping: this.stats.ping });
-                break;
-            case OP.CHAT:
-                this.emit('chat', data);
-                if (this.isHost) this.broadcast(OP.CHAT, data, senderId); // Relay
-                break;
-            case OP.LEADERBOARD:
-                this.emit('leaderboard', data);
-                break;
-        }
+    // Unused in Client-Server architecture but kept for interface compatibility
+    async hostGame(info: any): Promise<string> {
+        // In this architecture, "Hosting" just means joining the dedicated server as a player
+        await this.joinGame('SERVER', info);
+        return "OFFICIAL_SERVER";
     }
 
     // --- SENDING ---
-    public sendInput(input: any) {
-        if (!this.isHost && this.hostConn) {
-            this.hostConn.send([OP.INPUT, input, Date.now()]);
-        }
-    }
+    
+    // Send Input (Velocity/Rotation) to Server efficiently
+    public sendInput(input: { x: number, y: number, r: number, fire: boolean }) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-    public broadcastWorldState(entities: Entity[]) {
-        if (!this.isHost) return;
+        // Binary Packing: [Type(1)][VX(4)][VY(4)][Rot(4)][Seq(2)]
+        const buffer = new ArrayBuffer(15);
+        const view = new DataView(buffer);
         
-        // Optimize: Round numbers, remove static entities (walls) from frequent updates
-        const minData = entities
-            .filter(e => e.type !== 'WALL' && e.type !== 'ZONE')
-            .map(e => ({
-                id: e.id,
-                t: e.type,
-                x: Math.round(e.pos.x),
-                y: Math.round(e.pos.y),
-                r: Number(e.rotation.toFixed(2)),
-                h: Math.ceil(e.health),
-                m: Math.ceil(e.maxHealth),
-                c: e.color,
-                cp: e.classPath,
-                n: e.name,
-                ti: e.teamId
-            }));
-
-        this.broadcast(OP.WORLD_STATE, minData);
-    }
-
-    public sendWelcomePackage(playerId: string, entities: Entity[]) {
-        const conn = this.connections.get(playerId);
-        if (conn) {
-            // Full reliable state for new player
-            const fullState = entities.map(e => ({
-                ...e,
-                pos: { x: Math.round(e.pos.x), y: Math.round(e.pos.y) }
-            }));
-            conn.send([OP.JOIN_ACK, fullState, Date.now()]);
-        }
-    }
-
-    public broadcast(op: number, data: any, excludeId?: string) {
-        const packet = [op, data, Date.now()];
-        this.stats.packetsOut += this.connections.size; // Approx
-        this.connections.forEach((conn, id) => {
-            if (id !== excludeId && conn.open) conn.send(packet);
-        });
+        view.setUint8(0, MSG_INPUT); // Opcode
+        view.setFloat32(1, input.x, true); // VX
+        view.setFloat32(5, input.y, true); // VY
+        view.setFloat32(9, input.r, true); // Rotation
+        // Fire status could be packed into bits, keeping it simple for now
+        
+        this.ws.send(buffer);
+        this.stats.packetsOut++;
+        this.stats.bytesOut += 15;
     }
 
     public sendChat(msg: string, sender: string) {
-        const payload = { sender, content: msg };
-        if (this.isHost) {
-            this.emit('chat', payload); // Local echo
-            this.broadcast(OP.CHAT, payload);
-        } else if (this.hostConn) {
-            this.hostConn.send([OP.CHAT, payload, Date.now()]);
+        this.sendJson({ t: 'c', d: msg });
+    }
+
+    private sendJson(data: any) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(data));
         }
     }
 
-    public broadcastLeaderboard(data: any) {
-        this.broadcast(OP.LEADERBOARD, data);
+    // --- RECEIVING ---
+
+    private handleMessage(data: ArrayBuffer | string) {
+        this.stats.packetsIn++;
+
+        // 1. Binary World Update (High Frequency)
+        if (data instanceof ArrayBuffer) {
+            this.stats.bytesIn += data.byteLength;
+            const view = new DataView(data);
+            const op = view.getUint8(0);
+
+            if (op === MSG_WORLD_UPDATE) {
+                const serverTime = view.getFloat64(1, true);
+                const count = view.getUint16(9, true);
+                let offset = 11;
+
+                const entities = [];
+                for (let i = 0; i < count; i++) {
+                    // Protocol matched with Server
+                    const netId = view.getUint16(offset, true); offset += 2;
+                    const x = view.getUint16(offset, true); offset += 2; // 0-65535 map
+                    const y = view.getUint16(offset, true); offset += 2;
+                    const r = view.getUint8(offset); offset += 1;
+                    const hp = view.getUint8(offset); offset += 1;
+                    const seq = view.getUint16(offset, true); offset += 2;
+
+                    entities.push({
+                        netId,
+                        // Decompress Coordinates
+                        x: (x / 65535) * 5000, // 5000 is World Size
+                        y: (y / 65535) * 5000,
+                        r: (r / 255) * (Math.PI * 2) - Math.PI,
+                        hp: hp, // 0-100%
+                        seq
+                    });
+                }
+
+                // Add to Snapshot Buffer
+                this.snapshots.push({ time: Date.now(), entities });
+                // Keep buffer small (approx 1 sec of data)
+                if (this.snapshots.length > 20) this.snapshots.shift();
+            }
+            return;
+        }
+
+        // 2. JSON Events (Low Frequency)
+        if (typeof data === 'string') {
+            try {
+                const msg = JSON.parse(data);
+                if (msg.t === 'hello') {
+                    this.myId = msg.id;
+                    if (msg.restore) this.emit('restore_stats', msg.restore);
+                } else if (msg.t === 'init') {
+                    // Initial load of players
+                    this.emit('connected', msg.d);
+                    if (msg.self) {
+                        // Sync my initial position
+                        this.emit('teleport', msg.self);
+                    }
+                } else if (msg.t === 'j') {
+                    // Player Join
+                    this.emit('player_joined', msg.d);
+                } else if (msg.t === 'l') {
+                    // Player Left
+                    this.emit('player_left', msg.d);
+                } else if (msg.t === 'c') {
+                    this.emit('chat', msg.d);
+                }
+            } catch (e) {
+                console.error("JSON Parse Error", e);
+            }
+        }
+    }
+
+    // --- INTERPOLATION ENGINE ( The "Smoothness" ) ---
+    // Returns the calculated position for entities at the current render time
+    public getCurrentWorldState() {
+        const renderTime = Date.now() - this.renderDelay;
+
+        // Find the two snapshots surrounding renderTime
+        let prev = null;
+        let next = null;
+
+        for (let i = 0; i < this.snapshots.length - 1; i++) {
+            if (this.snapshots[i].time <= renderTime && this.snapshots[i+1].time >= renderTime) {
+                prev = this.snapshots[i];
+                next = this.snapshots[i+1];
+                break;
+            }
+        }
+
+        // If valid window found, interpolate
+        if (prev && next) {
+            const total = next.time - prev.time;
+            const elapsed = renderTime - prev.time;
+            const t = elapsed / total; // 0.0 to 1.0
+
+            return next.entities.map((n: any) => {
+                const p = prev!.entities.find((e: any) => e.netId === n.netId);
+                if (!p) return n; // No previous state, snap to current
+
+                return {
+                    ...n,
+                    x: p.x + (n.x - p.x) * t,
+                    y: p.y + (n.y - p.y) * t,
+                    // Shortest path rotation interpolation
+                    r: this.lerpAngle(p.r, n.r, t)
+                };
+            });
+        }
+
+        // Fallback: Return latest if available
+        if (this.snapshots.length > 0) return this.snapshots[this.snapshots.length - 1].entities;
+        return [];
+    }
+
+    private lerpAngle(start: number, end: number, t: number) {
+        let diff = end - start;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        return start + diff * t;
     }
 
     private measurePing() {
-        if (!this.isHost && this.hostConn) {
-            this.hostConn.send([OP.PING, null, Date.now()]);
+        // WebSocket has no built-in ping API exposed to JS, 
+        // usually handled by heartbeat frames or calculating difference between update timestamps.
+        // Simplified:
+        if (this.snapshots.length >= 2) {
+            const latest = this.snapshots[this.snapshots.length - 1];
+            this.stats.ping = Date.now() - latest.time; 
+            this.emit('net_stat', { ping: this.stats.ping });
         }
     }
 
-    // --- EVENTS ---
+    disconnect() {
+        this.ws?.close();
+    }
+
     on(event: string, fn: Function) {
         if (!this.handlers[event]) this.handlers[event] = [];
         this.handlers[event].push(fn);
@@ -216,13 +253,5 @@ export class NetworkManager {
 
     emit(event: string, data: any) {
         if (this.handlers[event]) this.handlers[event].forEach(fn => fn(data));
-    }
-
-    disconnect() {
-        if (this.isHost) {
-            this.connections.forEach(c => c.close());
-        } else {
-            this.hostConn?.close();
-        }
     }
 }

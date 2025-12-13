@@ -57,7 +57,7 @@ export class GameEngine {
     private isRunning: boolean = false;
     private lastTime: number = 0;
     private accumulator: number = 0;
-    private readonly FIXED_STEP: number = 1 / 60; // 60 Hz Physics
+    private readonly FIXED_STEP: number = 1 / 60; 
 
     // Callbacks
     private onUpdateStats: (s: PlayerState) => void;
@@ -108,7 +108,7 @@ export class GameEngine {
         // Player Setup
         this.playerManager = new PlayerManager(
             playerName, 
-            (gameMode === 'TEAMS_2' || gameMode === 'TEAMS_4') ? 'BLUE' : undefined,
+            undefined,
             onUpdateStats,
             this.audioManager,
             this.statusEffectSystem
@@ -119,8 +119,7 @@ export class GameEngine {
 
         // World Setup
         MapSystem.generateMap(this.entityManager.entities, gameMode);
-        this.playerManager.entity.pos = this.entityManager.getSpawnPos(this.playerManager.entity.teamId);
-
+        
         this.deathManager = new DeathManager(this.playerManager, this.notificationManager, this.cameraManager, this.audioManager, settings);
         
         // Controllers
@@ -136,60 +135,66 @@ export class GameEngine {
     }
 
     private setupNetworking() {
-        // HOST EVENTS
+        // --- 1. REMOTE PLAYER JOINED ---
         this.networkManager.on('player_joined', (data: any) => {
-            if (!this.networkManager.isHost) return;
-            const newPlayer = this.createRemotePlayer(data);
+            console.log("Remote Join:", data);
+            const newPlayer: Entity = {
+                id: data.id,
+                name: data.name,
+                type: EntityType.PLAYER,
+                pos: { x: data.x, y: data.y },
+                vel: { x: 0, y: 0 },
+                radius: 20,
+                rotation: 0,
+                color: COLORS.enemy,
+                health: 100, maxHealth: 100, damage: 20, isDead: false,
+                classPath: data.classPath || 'basic', // Critical: Get class
+                scoreValue: 0,
+                barrelCooldowns: [], barrelCharges: [], barrelRecoils: []
+            };
+            // Map netId for interpolation
+            (newPlayer as any).netId = data.netId;
             this.entityManager.add(newPlayer);
-            this.notificationManager.push(`${data.name} joined!`, 'info');
-            // IMPORTANT: Send full world state to new player immediately
-            this.networkManager.sendWelcomePackage(data.id, [this.playerManager.entity, ...this.entityManager.entities]);
+            this.notificationManager.push(`${data.name} joined.`, 'info');
         });
 
-        this.networkManager.on('remote_input', (data: any) => {
-            if (!this.networkManager.isHost) return;
-            const ent = this.entityManager.entities.find(e => e.id === data.id);
-            if (ent) (ent as any).remoteInput = data;
+        // --- 2. INITIAL WORLD LOAD ---
+        this.networkManager.on('connected', (players: any[]) => {
+            console.log(`[NET] Syncing with ${players.length} existing players`);
+            players.forEach(p => {
+                const ent: Entity = {
+                    id: p.id,
+                    name: p.name,
+                    type: EntityType.PLAYER,
+                    pos: { x: p.x, y: p.y },
+                    vel: { x: 0, y: 0 },
+                    radius: 20, rotation: 0, color: COLORS.enemy,
+                    health: 100, maxHealth: 100, damage: 0, isDead: false,
+                    classPath: p.classPath || 'basic',
+                    barrelCooldowns: []
+                };
+                (ent as any).netId = p.netId;
+                this.entityManager.add(ent);
+            });
         });
 
-        // CLIENT EVENTS
-        this.networkManager.on('connected', (initialState: any) => {
-            // Load initial world
-            console.log("Connected! Loading world...", initialState.length);
-            // Clear current dynamic entities but keep walls? Or simple replace
-            const staticWalls = this.entityManager.entities.filter(e => e.type === EntityType.WALL || e.type === EntityType.ZONE);
-            
-            // Merge
-            const serverEntities = initialState.map((raw: any) => this.parseSnapshotEntity(raw));
-            this.entityManager.entities = [...staticWalls, ...serverEntities];
+        // --- 3. TELEPORT SELF (Spawn) ---
+        this.networkManager.on('teleport', (pos: any) => {
+            this.playerManager.entity.pos = { x: pos.x, y: pos.y };
+            (this.playerManager.entity as any).netId = pos.netId;
         });
 
         this.networkManager.on('player_left', (data: any) => {
             const idx = this.entityManager.entities.findIndex(e => e.id === data.id);
             if (idx !== -1) {
                 this.entityManager.entities.splice(idx, 1);
-                this.notificationManager.push("Player disconnected", 'warning');
             }
         });
 
         this.networkManager.on('chat', (data: any) => {
             this.chatManager.addMessage(data.sender, data.content);
-            // Visual text bubble
             const speaker = this.entityManager.entities.find(e => e.name === data.sender) || (data.sender === this.playerManager.entity.name ? this.playerManager.entity : null);
             if (speaker) PhysicsSystem.spawnFloatingText(this.entityManager.entities, speaker.pos, data.content, '#fff');
-        });
-
-        this.networkManager.on('leaderboard', (data: any) => {
-            if (!this.networkManager.isHost) {
-                this.playerManager.state.leaderboard = data;
-                // Update Leader Arrow
-                if (data[0] && data[0].id !== this.networkManager.myId) {
-                    const leader = this.entityManager.entities.find(e => e.id === data[0].id);
-                    this.playerManager.state.leaderPos = leader ? leader.pos : undefined;
-                } else {
-                    this.playerManager.state.leaderPos = undefined;
-                }
-            }
         });
     }
 
@@ -198,42 +203,61 @@ export class GameEngine {
         this.lastTime = performance.now();
         const loop = (time: number) => {
             if (!this.isRunning) return;
-            
             const frameTime = (time - this.lastTime) / 1000;
             this.lastTime = time;
-            
-            // Spiral of death protection
-            if (frameTime > 0.25) this.accumulator = 0; 
-            else this.accumulator += frameTime;
+            if (frameTime > 0.25) this.accumulator = 0; else this.accumulator += frameTime;
 
-            // Fixed Update (Physics)
             while (this.accumulator >= this.FIXED_STEP) {
                 this.fixedUpdate(this.FIXED_STEP);
                 this.accumulator -= this.FIXED_STEP;
             }
-
-            // Render Update (Visuals)
-            // Calculate alpha for interpolation if needed (accumulator / FIXED_STEP)
             this.render();
-            
             requestAnimationFrame(loop);
         };
         requestAnimationFrame(loop);
     }
 
-    // --- PHYSICS LOOP (60 Hz) ---
     private fixedUpdate(dt: number) {
-        if (this.networkManager.isHost) {
-            this.updateHost(dt);
-        } else {
-            this.updateClient(dt);
+        // 1. INPUT (Send to Server)
+        const move = this.inputManager.getMovementVector();
+        const fire = this.inputManager.getIsFiring();
+        this.networkManager.sendInput({ 
+            x: move.x, y: move.y, r: this.playerManager.entity.rotation, fire 
+        });
+
+        // 2. CLIENT-SIDE PREDICTION (Move Self)
+        this.playerController.update(dt, [], () => {}); 
+        const player = this.playerManager.entity;
+        // Simple physics for local feel
+        player.pos.x += player.vel.x * dt;
+        player.pos.y += player.vel.y * dt;
+        player.vel.x *= 0.90; // Match Server Friction
+        player.vel.y *= 0.90;
+
+        // 3. SERVER RECONCILIATION (Remote Entities)
+        const serverState = this.networkManager.getCurrentWorldState();
+        if (serverState) {
+            serverState.forEach((snap: any) => {
+                // If it's me, sync stats/health but trust my position (mostly)
+                if (snap.netId === (player as any).netId) {
+                    player.health = snap.hp; // 0-100 mapped to maxHp
+                    return;
+                }
+
+                // If it's another player, find them and SNAP/LERP
+                const ent = this.entityManager.entities.find(e => (e as any).netId === snap.netId);
+                if (ent) {
+                    ent.pos.x = snap.x;
+                    ent.pos.y = snap.y;
+                    ent.rotation = snap.r;
+                    ent.health = snap.hp; // Visual only
+                }
+            });
         }
 
-        // Shared Logic
-        this.chatManager.update(dt, this.entityManager.entities);
-        if (this.notificationManager.update()) {
-            this.playerManager.state.notifications = this.notificationManager.notifications;
-        }
+        // 4. Local Simulation (Particles, etc.)
+        ParticleSystem.update(this.entityManager.entities, dt);
+        this.statusEffectSystem.update(this.entityManager.entities, dt);
         
         // Debug Data
         if (this.isDebugMode) {
@@ -241,198 +265,14 @@ export class GameEngine {
                 fps: Math.round(this.renderSystem.currentFps),
                 ping: this.networkManager.stats.ping,
                 entities: this.entityManager.entities.length + 1,
-                pos: this.playerManager.entity.pos,
-                isHost: this.networkManager.isHost
+                pos: this.playerManager.entity.pos
             });
         }
-    }
-
-    // --- HOST LOGIC ---
-    private updateHost(dt: number) {
-        const entities = this.entityManager.entities;
-        const player = this.playerManager.entity;
         
-        // 1. Process Inputs (Local + Remote)
-        this.playerController.update(dt, entities, this.pushNotification.bind(this));
-        
-        // Apply remote inputs
-        entities.forEach(ent => {
-            if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
-                const input = (ent as any).remoteInput;
-                const speed = this.statManager.getStat(ent, 'moveSpd') * 60;
-                ent.vel.x += input.x * speed * dt * 5;
-                ent.vel.y += input.y * speed * dt * 5;
-                ent.rotation = input.r;
-                
-                // Remote Shooting
-                if (input.fire) {
-                    const config = TANK_CLASSES[ent.classPath || 'basic'];
-                    if (config) {
-                        WeaponSystem.update(ent, config, dt, true, false, entities, 
-                            (k) => this.statManager.getStat(ent, k),
-                            (s, a, o, b) => PhysicsSystem.processHitscan(s, a, o, b, entities, player, this.handleDeath.bind(this), this.cameraManager, this.statManager, this.statusEffectSystem, this.audioManager)
-                        );
-                    }
-                }
-            }
-        });
-
-        // 2. AI & Spawning
-        this.aiController.update(dt, entities, player, this.cameraManager, this.handleDeath.bind(this));
-        if (this.gameMode !== 'SANDBOX') {
-            this.spawnManager.update(dt, entities, player, this.gameMode, (t) => this.entityManager.getSpawnPos(t), this.pushNotification.bind(this));
+        this.chatManager.update(dt, this.entityManager.entities);
+        if (this.notificationManager.update()) {
+            this.playerManager.state.notifications = this.notificationManager.notifications;
         }
-
-        // 3. Physics & Collisions
-        this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, this.handleDeath.bind(this));
-
-        // 4. Broadcast State (20Hz to save bandwidth, but physics runs 60Hz)
-        // We can use a timer here or just send every frame if local
-        this.networkManager.broadcastWorldState([player, ...entities]);
-        
-        // Leaderboard Update
-        if (this.leaderboardManager.shouldUpdate()) {
-            this.leaderboardManager.update(entities, player, this.playerManager.state);
-            this.playerManager.emitUpdate();
-            this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
-        }
-    }
-
-    // --- CLIENT LOGIC ---
-    private updateClient(dt: number) {
-        // 1. Prediction (Local Player)
-        const move = this.inputManager.getMovementVector();
-        const fire = this.inputManager.getIsFiring();
-        
-        // Send Input
-        this.networkManager.sendInput({ 
-            x: move.x, y: move.y, r: this.playerManager.entity.rotation, fire 
-        });
-
-        // Predict Movement
-        this.playerController.update(dt, [], () => {});
-        PhysicsSystem.updateMovement([this.playerManager.entity], dt, this.statManager, WORLD_SIZE, WORLD_SIZE);
-
-        // 2. Interpolation (Remote Entities)
-        const snapshots = this.networkManager.snapshots;
-        if (snapshots.length >= 2) {
-            // Find the two snapshots to interpolate between
-            // Render time is "now - 100ms" (buffer)
-            const renderTime = Date.now() - 100;
-            
-            let t0 = snapshots[0];
-            let t1 = snapshots[1];
-
-            // Find window
-            for (let i = 0; i < snapshots.length - 1; i++) {
-                if (snapshots[i].time <= renderTime && snapshots[i+1].time >= renderTime) {
-                    t0 = snapshots[i];
-                    t1 = snapshots[i+1];
-                    break;
-                }
-            }
-
-            // Interpolate
-            if (t0 && t1) {
-                const total = t1.time - t0.time;
-                const portion = renderTime - t0.time;
-                const ratio = Math.max(0, Math.min(1, portion / total));
-
-                this.applyInterpolation(t0.entities, t1.entities, ratio);
-            }
-        }
-
-        // 3. Client-Side Effects (Particles)
-        ParticleSystem.update(this.entityManager.entities, dt);
-    }
-
-    private applyInterpolation(prevList: any[], nextList: any[], ratio: number) {
-        const nextMap = new Map(nextList.map((e: any) => [e.id, e]));
-        const currentIds = new Set<string>();
-
-        nextList.forEach((next: any) => {
-            currentIds.add(next.id);
-            if (next.id === this.networkManager.myId) {
-                // Reconciliation for Self (Health, Score only, Position is predicted)
-                this.playerManager.entity.health = next.h;
-                this.playerManager.entity.maxHealth = next.m || 100;
-                this.playerManager.state.score = next.s || 0;
-                return;
-            }
-
-            let ent = this.entityManager.entities.find(e => e.id === next.id);
-            const prev = prevList.find((e: any) => e.id === next.id) || next;
-
-            if (!ent) {
-                // Spawn new
-                ent = this.parseSnapshotEntity(next);
-                this.entityManager.add(ent);
-            } else {
-                // Lerp Position & Rotation
-                ent.pos.x = prev.x + (next.x - prev.x) * ratio;
-                ent.pos.y = prev.y + (next.y - prev.y) * ratio;
-                
-                // Shortest path rotation
-                let diff = next.r - prev.r;
-                while (diff < -Math.PI) diff += Math.PI * 2;
-                while (diff > Math.PI) diff -= Math.PI * 2;
-                ent.rotation = prev.r + diff * ratio;
-
-                // Snap visuals
-                ent.health = next.h;
-                ent.maxHealth = next.m || ent.maxHealth;
-                ent.classPath = next.cp || ent.classPath;
-                ent.color = next.c || ent.color;
-            }
-        });
-
-        // Cleanup missing
-        this.entityManager.entities = this.entityManager.entities.filter(e => {
-            if (e.type === EntityType.PARTICLE || e.type === EntityType.FLOATING_TEXT) return true;
-            if (e.type === EntityType.WALL || e.type === EntityType.ZONE) return true;
-            return currentIds.has(e.id);
-        });
-    }
-
-    // --- HELPERS ---
-    
-    private parseSnapshotEntity(raw: any): Entity {
-        return {
-            id: raw.id,
-            type: raw.t,
-            pos: { x: raw.x, y: raw.y },
-            vel: { x: 0, y: 0 },
-            rotation: raw.r,
-            radius: 20, // Should be derived from type/class
-            color: raw.c || '#fff',
-            health: raw.h,
-            maxHealth: raw.m || 100,
-            damage: 0,
-            isDead: false,
-            classPath: raw.cp || 'basic',
-            name: raw.n,
-            teamId: raw.ti
-        };
-    }
-
-    private createRemotePlayer(data: any): Entity {
-        return {
-            id: data.id,
-            name: data.name,
-            type: EntityType.PLAYER,
-            pos: this.entityManager.getSpawnPos(),
-            vel: { x: 0, y: 0 },
-            radius: 20,
-            rotation: 0,
-            color: COLORS.enemy,
-            health: 100, maxHealth: 100, damage: 20,
-            isDead: false,
-            classPath: data.tank || 'basic',
-            scoreValue: 0,
-            // @ts-ignore
-            remoteInput: { x: 0, y: 0, fire: false, r: 0 },
-            barrelCooldowns: [], barrelCharges: [], barrelRecoils: []
-        };
     }
 
     private render() {
@@ -455,21 +295,23 @@ export class GameEngine {
         );
     }
 
+    // ... (Helpers remain same) ...
     private handleDeath(v: Entity, k: Entity) {
         this.deathManager.handleDeath(v, k, this.entityManager.entities);
     }
-
-    public pushNotification(msg: string, type: any = 'info') {
-        this.notificationManager.push(msg, type);
+    public upgradeStat(key: StatKey) { 
+        this.playerManager.upgradeStat(key); 
+        // Sync stats to server
+        this.networkManager.sendChat(JSON.stringify({ t:'update_stat', d: this.playerManager.state }), 'SYSTEM');
     }
-
-    public upgradeStat(key: StatKey) { this.playerManager.upgradeStat(key); }
     public evolve(c: string) { this.playerManager.evolve(c); }
-    public spawnBoss(t?: BossType) { if(this.networkManager.isHost) this.spawnManager.spawnBoss(this.entityManager.entities, this.playerManager.entity, this.pushNotification.bind(this), t); }
-    public closeArena() { if(this.networkManager.isHost) this.spawnManager.closeArena(this.pushNotification.bind(this)); }
+    public spawnBoss(t?: BossType) {}
+    public closeArena() {}
     public respawn() { 
-        if(this.spawnManager.isArenaClosing) return alert("Arena Closed");
-        if(this.playerManager.entity.isDead) this.playerManager.reset(this.entityManager.getSpawnPos(this.playerManager.entity.teamId));
+        if(this.playerManager.entity.isDead) {
+            const spawn = this.entityManager.getSpawnPos();
+            this.playerManager.reset(spawn);
+        }
     }
     public destroy() {
         this.isRunning = false;
@@ -477,22 +319,18 @@ export class GameEngine {
         this.networkManager.disconnect();
         delete (window as any).tankAPI;
     }
-    
-    // Sandbox
-    public cheatLevelUp() { this.playerManager.gainXp(999999, 1); }
-    public cheatSetLevel(l: number) { this.playerManager.setLevel(l); }
-    public cheatMaxStats() { this.playerManager.state.availablePoints += 50; }
-    public cheatToggleGodMode() { this.playerManager.state.godMode = !this.playerManager.state.godMode; }
-    public cheatSpawnDummy() { if(this.networkManager.isHost) AISystem.spawnBots(this.entityManager.entities, 1, 'SANDBOX', () => ({x:2500,y:2500})); }
-    public cheatSpawnBoss() { if(this.networkManager.isHost) this.spawnBoss(); }
-    public cheatClassSwitch(id: string) { this.playerManager.evolve(id); }
-    public cheatSuicide() { this.handleDeath(this.playerManager.entity, this.playerManager.entity); }
-    
     public updateSettings(s: GameSettings) { 
         this.settings = s; 
         this.audioManager.updateSettings(s.audio); 
-        this.deathManager.updateSettings(s);
-        this.worldController.updateSettings(s);
     }
-    public executeCommand(c: string) { /* ... command manager ... */ return "Executed"; }
+    public executeCommand(c: string) { return "CMD"; }
+    // Cheats (disabled in prod usually)
+    public cheatLevelUp() { this.playerManager.gainXp(999999, 1); }
+    public cheatSetLevel(l: number) { this.playerManager.setLevel(l); }
+    public cheatMaxStats() {}
+    public cheatToggleGodMode() {}
+    public cheatSpawnDummy() {}
+    public cheatSpawnBoss() {}
+    public cheatClassSwitch(id: string) { this.playerManager.evolve(id); }
+    public cheatSuicide() {}
 }
