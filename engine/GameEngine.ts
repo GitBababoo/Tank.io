@@ -7,6 +7,8 @@ import { WorldSystem } from './systems/WorldSystem';
 import { MapSystem } from './systems/MapSystem'; 
 import { ParticleSystem } from './systems/ParticleSystem';
 import { PhysicsSystem } from './systems/PhysicsSystem'; 
+import { WeaponSystem } from './systems/WeaponSystem'; // Added Import
+import { TANK_CLASSES } from '../data/tanks'; // Added Import
 import { COLORS, TEAM_COLORS, WORLD_SIZE } from '../constants';
 import { InputManager } from './managers/InputManager';
 import { PlayerManager } from './managers/PlayerManager';
@@ -192,13 +194,14 @@ export class GameEngine {
   }
 
   bindNetworkEvents() {
-    // --- HOST LOGIC ---
+    // --- HOST LOGIC (Server Side) ---
     this.networkManager.on('player_joined', (data) => {
         if (this.isDestroyed || !this.networkManager.isHost) return;
         
         console.log(`[NET] Player Joined: ${data.name}`);
         const spawnPos = this.entityManager.getSpawnPos();
 
+        // Initialize REMOTE player with FULL STATS to prevent bugs
         const newPlayer: Entity = {
             id: data.id,
             name: data.name,
@@ -208,12 +211,19 @@ export class GameEngine {
             radius: 20,
             rotation: 0,
             color: COLORS.enemy,
-            health: 100, maxHealth: 100, damage: 20, isDead: false,
+            // IMPORTANT: Set initial health/maxHealth correctly
+            health: 100, 
+            maxHealth: 100, 
+            damage: 20, 
+            isDead: false,
             teamId: undefined, 
-            classPath: data.tank || 'basic', // Host must store remote tank class
+            classPath: data.tank || 'basic', 
             scoreValue: 0,
             // @ts-ignore
-            remoteInput: { x: 0, y: 0, fire: false, r: 0 } 
+            remoteInput: { x: 0, y: 0, fire: false, r: 0 },
+            barrelCooldowns: [], // Initialize arrays
+            barrelCharges: [],
+            barrelRecoils: []
         };
         this.entityManager.add(newPlayer);
         this.notificationManager.push(`${data.name} joined.`, 'info');
@@ -231,7 +241,7 @@ export class GameEngine {
         }
     });
 
-    // --- CLIENT LOGIC ---
+    // --- CLIENT LOGIC (Player Side) ---
     this.networkManager.on('world_update', (snapshot: any[]) => {
         if (this.networkManager.isHost) return;
 
@@ -244,12 +254,13 @@ export class GameEngine {
                 // Client-Side Prediction Reconciliation
                 this.serverReconciliationPosition = { x: remote.x, y: remote.y };
                 
-                // Sync Vital Stats (Fix Red Screen by syncing maxHealth)
+                // Sync Vital Stats (Fix Red Screen)
+                // Use fallback '100' if 'm' (maxHealth) is missing or 0
+                const safeMaxHp = remote.m || this.playerManager.state.maxHealth || 100;
+                
                 this.playerManager.entity.health = remote.h;
-                if (remote.m) {
-                    this.playerManager.entity.maxHealth = remote.m;
-                    this.playerManager.state.maxHealth = remote.m; // Sync state too
-                }
+                this.playerManager.entity.maxHealth = safeMaxHp;
+                this.playerManager.state.maxHealth = safeMaxHp; 
                 this.playerManager.state.score = remote.s || 0;
             } else {
                 // Sync Other Entities
@@ -264,11 +275,11 @@ export class GameEngine {
                         rotation: remote.r,
                         color: remote.c || '#fff',
                         health: remote.h,
-                        maxHealth: remote.m || 100, // Default to avoid divide by zero
+                        maxHealth: remote.m || 100, 
                         damage: 0,
                         isDead: false,
                         name: remote.n,
-                        classPath: remote.cp || 'basic', // FIX INVISIBLE TANK: Default to basic if missing
+                        classPath: remote.cp || 'basic', // FIX: Default to basic if missing
                         teamId: remote.ti,
                         targetPos: { x: remote.x, y: remote.y }
                     };
@@ -282,8 +293,8 @@ export class GameEngine {
                     ent.rotation += diff * 0.5;
 
                     ent.health = remote.h;
-                    ent.maxHealth = remote.m || ent.maxHealth;
-                    if (remote.cp) ent.classPath = remote.cp; // Update class if changed
+                    ent.maxHealth = remote.m || ent.maxHealth || 100;
+                    if (remote.cp) ent.classPath = remote.cp; 
                 }
             }
         });
@@ -331,6 +342,7 @@ export class GameEngine {
   update(dt: number) {
     if (this.isDestroyed) return;
     
+    // --- HOST LOGIC (Authoritative) ---
     if (this.networkManager.isHost) {
         const entities = this.entityManager.entities;
         const player = this.playerManager.entity;
@@ -338,27 +350,59 @@ export class GameEngine {
         const handleDeathWrapper = (v: Entity, k: Entity) => {
             this.deathManager.handleDeath(v, k, entities);
         };
+        
+        // Define Hitscan Handler for Remote Players
+        const handleHitscan = (start: Vector2, angle: number, owner: Entity, barrel: Barrel) => 
+                PhysicsSystem.processHitscan(start, angle, owner, barrel, entities, player, handleDeathWrapper, this.cameraManager, this.statManager, this.statusEffectSystem, this.audioManager);
 
+        // 1. Process Remote Players (Movement AND Shooting)
         entities.forEach(ent => {
             if (ent.type === EntityType.PLAYER && ent.id !== 'player' && (ent as any).remoteInput) {
                 const input = (ent as any).remoteInput;
                 const speed = this.statManager.getStat(ent, 'moveSpd') * 60;
+                
+                // Movement
                 ent.vel.x += input.x * speed * dt * 5; 
                 ent.vel.y += input.y * speed * dt * 5;
                 ent.rotation = input.r; 
+
+                // Shooting (CRITICAL FIX: Call WeaponSystem for remote players)
+                if (input.fire) {
+                    const config = TANK_CLASSES[ent.classPath || 'basic'];
+                    if (config) {
+                        WeaponSystem.update(
+                            ent, 
+                            config, 
+                            dt, 
+                            true, // isShooting
+                            false, 
+                            entities, 
+                            (key) => this.statManager.getStat(ent, key), // Stat Accessor
+                            handleHitscan,
+                            0, // Ability Timer (simplified for remote)
+                            this.audioManager,
+                            ent.pos // Sound origin
+                        );
+                    }
+                } else {
+                    // Update cooldowns even if not firing
+                    const config = TANK_CLASSES[ent.classPath || 'basic'];
+                    if (config) {
+                        WeaponSystem.update(ent, config, dt, false, false, entities, (key) => this.statManager.getStat(ent, key), handleHitscan);
+                    }
+                }
             }
         });
 
+        // 2. Process Local Player
         this.playerManager.update(dt);
         this.playerController.update(dt, entities, this.pushNotification.bind(this));
         
         if (!player.isDead) {
-            const handleHitscan = (start: Vector2, angle: number, owner: Entity, barrel: Barrel) => 
-                PhysicsSystem.processHitscan(start, angle, owner, barrel, entities, player, handleDeathWrapper, this.cameraManager, this.statManager, this.statusEffectSystem, this.audioManager);
-            
             this.playerController.handleFiring(dt, entities, handleHitscan);
         }
 
+        // 3. AI & World
         this.aiController.update(dt, entities, player, this.cameraManager, handleDeathWrapper);
         this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, handleDeathWrapper);
         
@@ -368,7 +412,7 @@ export class GameEngine {
 
         ParticleSystem.update(entities, dt);
         
-        // Broadcast with max health included
+        // 4. Broadcast (Send MaxHealth explicitly)
         this.networkManager.broadcastWorldState([player, ...entities]);
 
         if (this.leaderboardManager.shouldUpdate()) {
@@ -377,21 +421,25 @@ export class GameEngine {
             this.networkManager.broadcastLeaderboard(this.leaderboardManager.getLatest());
         }
     
-    } else {
+    } 
+    // --- CLIENT LOGIC (Prediction) ---
+    else {
         const move = this.inputManager.getMovementVector();
         const fire = this.inputManager.getIsFiring();
         this.networkManager.sendClientInput({ 
             x: move.x, 
             y: move.y, 
             r: this.playerManager.entity.rotation,
-            fire: fire
+            fire: fire // Send fire state!
         });
 
+        // Client Prediction
         this.playerController.update(dt, [], () => {}); 
         const player = this.playerManager.entity;
         
         PhysicsSystem.updateMovement([player], dt, this.statManager, WORLD_SIZE, WORLD_SIZE);
 
+        // Reconciliation
         if (this.serverReconciliationPosition) {
             const dx = this.serverReconciliationPosition.x - player.pos.x;
             const dy = this.serverReconciliationPosition.y - player.pos.y;
@@ -407,6 +455,7 @@ export class GameEngine {
             this.serverReconciliationPosition = null;
         }
 
+        // Interpolation
         this.entityManager.entities.forEach(ent => {
             if (ent.targetPos) {
                 ent.pos.x += (ent.targetPos.x - ent.pos.x) * 0.3; 
@@ -422,6 +471,7 @@ export class GameEngine {
         this.playerManager.state.notifications = this.notificationManager.notifications;
     }
 
+    // DEBUG
     if (this.isDebugMode) {
         this.onDebugUpdate({
             fps: Math.round(this.renderSystem.currentFps),
@@ -438,7 +488,7 @@ export class GameEngine {
     }
   }
 
-  // ... (Render and other methods) ...
+  // ... (Render and other methods remain unchanged) ...
   render() {
     const cameraConfig = this.cameraManager.getCameraTarget(this.playerManager.entity, this.entityManager.entities);
     this.renderSystem.draw(

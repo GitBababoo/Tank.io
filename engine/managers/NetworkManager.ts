@@ -76,7 +76,6 @@ export class NetworkManager {
                     this.isConnected = true;
                     this.hostConn = conn;
                     
-                    // Send Join Request with initial tank class
                     conn.send({
                         op: OP_JOIN,
                         data: { 
@@ -169,7 +168,7 @@ export class NetworkManager {
     public broadcastWorldState(entities: Entity[]) {
         if (!this.isHost || this.connections.length === 0) return;
         
-        // OPTIMIZATION: Send crucial visual data (ClassPath, MaxHealth)
+        // OPTIMIZATION: Send crucial visual data
         const snapshot = entities.map(e => ({
             id: e.id,
             t: e.type,
@@ -177,9 +176,9 @@ export class NetworkManager {
             y: Math.round(e.pos.y),
             r: parseFloat(e.rotation.toFixed(2)),
             h: Math.ceil(e.health),
-            m: Math.ceil(e.maxHealth), // Send Max HP (Fixes red screen)
+            m: Math.ceil(e.maxHealth) || 100, // SAFETY: Ensure maxHealth is never 0 or undefined
             c: e.color,
-            cp: e.classPath || 'basic', // Send Class Path (Fixes invisible tank)
+            cp: e.classPath || 'basic', // FIX INVISIBLE: Default to basic
             n: e.name,
             ti: e.teamId
         }));
