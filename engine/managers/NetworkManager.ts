@@ -1,227 +1,154 @@
 
 import { Entity, GameMode, EntityType } from '../../types';
+import { WORLD_SIZE } from '../../constants';
 
-// Protocol Tags (Must match Server)
-const MSG_INPUT = 1;
-const MSG_WORLD_UPDATE = 2;
-const MSG_JOIN = 3;
-const MSG_INIT = 4;
+const OP_JOIN = 1;
+const OP_WORLD_UPDATE = 2;
+const OP_INPUT = 3;
+const OP_INIT = 4;
 
 export class NetworkManager {
     public isConnected: boolean = false;
-    public isHost: boolean = false; // Deprecated concept in Client-Server, but kept for compatibility
-    public myId: string | null = null;
+    public myNetId: number | null = null;
     
     private ws: WebSocket | null = null;
     
-    // --- SNAPSHOT INTERPOLATION ---
-    // Stores the last 20 updates from server to smooth out movement
-    public snapshots: { time: number, entities: any[] }[] = [];
-    public serverTimeOffset: number = 0;
-    public renderDelay: number = 100; // 100ms buffer for smooth lerping
+    // Snapshot Interpolation Buffer
+    private snapshots: { time: number, entities: Map<number, any> }[] = [];
+    private renderDelay = 100; // 100ms interpolation buffer (smoothness vs latency trade-off)
 
-    // Event Handlers
     private handlers: Record<string, Function[]> = {};
 
-    public stats = { ping: 0, rtt: 0, packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0 };
+    public stats = { ping: 0, packetsIn: 0, packetsOut: 0 };
 
-    constructor() {
-        setInterval(() => this.measurePing(), 1000);
+    constructor() {}
+
+    async hostGame(settings: any): Promise<string> {
+        // Mock hosting logic for P2P/Local mode compatibility
+        // In a real implementation, this would request a room ID from a matchmaking server
+        await this.joinGame({ ...settings, isHost: true });
+        return "local_room_" + Math.floor(Math.random() * 10000);
     }
 
-    // --- CONNECT ---
-    async joinGame(hostId: string, playerInfo: any): Promise<void> {
+    async joinGame(roomIdOrInfo: string | any, playerInfo?: any): Promise<void> {
+        let info = roomIdOrInfo;
+        if (typeof roomIdOrInfo === 'string') {
+            info = playerInfo || {};
+            info.roomId = roomIdOrInfo;
+        }
+
         return new Promise((resolve, reject) => {
-            // Determine Server URL (Localhost or Production)
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.hostname;
-            const port = '8080'; // Explicit port for dev
-            const url = `${protocol}//${host}:${port}/ws?uid=${playerInfo.id || 'guest'}&name=${playerInfo.name}`;
-
-            console.log(`[NET] Connecting to Middleman: ${url}`);
+            const port = '8080';
             
+            const uid = info.id || `guest_${Math.random().toString(36).slice(2)}`;
+            const roomParam = info.roomId ? `&room=${info.roomId}` : '';
+            const url = `${protocol}//${host}:${port}/ws?uid=${uid}${roomParam}`;
+
+            console.log(`[NET] Connecting to ${url}`);
             this.ws = new WebSocket(url);
             this.ws.binaryType = 'arraybuffer';
 
             this.ws.onopen = () => {
                 this.isConnected = true;
-                this.isHost = false; // Server is always host
-                console.log("[NET] WebSocket Connected!");
-                
-                // Send Join Request
-                this.sendJson({ t: 'join', d: { room: 'FFA', ...playerInfo } });
                 resolve();
             };
 
-            this.ws.onmessage = (event) => {
-                this.handleMessage(event.data);
-            };
-
-            this.ws.onclose = () => {
-                this.isConnected = false;
-                this.emit('disconnected', null);
-                console.log("[NET] Disconnected from Server");
-            };
-
-            this.ws.onerror = (err) => {
-                console.error("[NET] WebSocket Error", err);
-                reject(err);
-            };
+            this.ws.onmessage = (event) => this.handleMessage(event.data);
+            this.ws.onclose = () => this.emit('disconnected', null);
+            this.ws.onerror = (err) => reject(err);
         });
     }
 
-    // Unused in Client-Server architecture but kept for interface compatibility
-    async hostGame(info: any): Promise<string> {
-        // In this architecture, "Hosting" just means joining the dedicated server as a player
-        await this.joinGame('SERVER', info);
-        return "OFFICIAL_SERVER";
-    }
-
-    // --- SENDING ---
-    
-    // Send Input (Velocity/Rotation) to Server efficiently
-    public sendInput(input: { x: number, y: number, r: number, fire: boolean }) {
+    // High Frequency Input Sending (60Hz)
+    sendInput(input: { x: number, y: number, r: number, fire: boolean }) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-        // Binary Packing: [Type(1)][VX(4)][VY(4)][Rot(4)][Seq(2)]
-        const buffer = new ArrayBuffer(15);
+        // Create a compact binary packet: 14 bytes
+        const buffer = new ArrayBuffer(14);
         const view = new DataView(buffer);
         
-        view.setUint8(0, MSG_INPUT); // Opcode
-        view.setFloat32(1, input.x, true); // VX
-        view.setFloat32(5, input.y, true); // VY
-        view.setFloat32(9, input.r, true); // Rotation
-        // Fire status could be packed into bits, keeping it simple for now
-        
+        view.setUint8(0, OP_INPUT);
+        view.setFloat32(1, input.x, true);
+        view.setFloat32(5, input.y, true);
+        view.setFloat32(9, input.r, true);
+        view.setUint8(13, input.fire ? 1 : 0);
+
         this.ws.send(buffer);
         this.stats.packetsOut++;
-        this.stats.bytesOut += 15;
     }
-
-    public sendChat(msg: string, sender: string) {
-        this.sendJson({ t: 'c', d: msg });
-    }
-
-    private sendJson(data: any) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(data));
-        }
-    }
-
-    // --- RECEIVING ---
 
     private handleMessage(data: ArrayBuffer | string) {
         this.stats.packetsIn++;
 
-        // 1. Binary World Update (High Frequency)
+        // 1. Binary World Update
         if (data instanceof ArrayBuffer) {
-            this.stats.bytesIn += data.byteLength;
             const view = new DataView(data);
             const op = view.getUint8(0);
 
-            if (op === MSG_WORLD_UPDATE) {
+            if (op === OP_WORLD_UPDATE) {
                 const serverTime = view.getFloat64(1, true);
                 const count = view.getUint16(9, true);
                 let offset = 11;
 
-                const entities = [];
+                const entities = new Map();
                 for (let i = 0; i < count; i++) {
-                    // Protocol matched with Server
                     const netId = view.getUint16(offset, true); offset += 2;
-                    const x = view.getUint16(offset, true); offset += 2; // 0-65535 map
-                    const y = view.getUint16(offset, true); offset += 2;
-                    const r = view.getUint8(offset); offset += 1;
+                    const x = (view.getUint16(offset, true) / 65535) * WORLD_SIZE; offset += 2;
+                    const y = (view.getUint16(offset, true) / 65535) * WORLD_SIZE; offset += 2;
+                    const r = (view.getUint8(offset) / 255) * (Math.PI * 2) - Math.PI; offset += 1;
                     const hp = view.getUint8(offset); offset += 1;
-                    const seq = view.getUint16(offset, true); offset += 2;
 
-                    entities.push({
-                        netId,
-                        // Decompress Coordinates
-                        x: (x / 65535) * 5000, // 5000 is World Size
-                        y: (y / 65535) * 5000,
-                        r: (r / 255) * (Math.PI * 2) - Math.PI,
-                        hp: hp, // 0-100%
-                        seq
-                    });
+                    entities.set(netId, { x, y, r, hp });
                 }
 
-                // Add to Snapshot Buffer
                 this.snapshots.push({ time: Date.now(), entities });
-                // Keep buffer small (approx 1 sec of data)
+                // Trim buffer
                 if (this.snapshots.length > 20) this.snapshots.shift();
             }
             return;
         }
 
-        // 2. JSON Events (Low Frequency)
+        // 2. JSON Events (Init, Chat, etc)
         if (typeof data === 'string') {
             try {
                 const msg = JSON.parse(data);
-                if (msg.t === 'hello') {
-                    this.myId = msg.id;
-                    if (msg.restore) this.emit('restore_stats', msg.restore);
-                } else if (msg.t === 'init') {
-                    // Initial load of players
+                if (msg.t === OP_INIT) {
+                    this.myNetId = msg.d.netId;
                     this.emit('connected', msg.d);
-                    if (msg.self) {
-                        // Sync my initial position
-                        this.emit('teleport', msg.self);
-                    }
-                } else if (msg.t === 'j') {
-                    // Player Join
+                } else if (msg.t === OP_JOIN) {
                     this.emit('player_joined', msg.d);
-                } else if (msg.t === 'l') {
-                    // Player Left
-                    this.emit('player_left', msg.d);
-                } else if (msg.t === 'c') {
-                    this.emit('chat', msg.d);
                 }
-            } catch (e) {
-                console.error("JSON Parse Error", e);
-            }
+            } catch (e) { console.error(e); }
         }
     }
 
-    // --- INTERPOLATION ENGINE ( The "Smoothness" ) ---
-    // Returns the calculated position for entities at the current render time
-    public getCurrentWorldState() {
+    // The Magic: Get smoothed position for an entity
+    public getInterpolatedState(netId: number) {
         const renderTime = Date.now() - this.renderDelay;
-
-        // Find the two snapshots surrounding renderTime
-        let prev = null;
-        let next = null;
-
+        
+        // Find snapshots around renderTime
         for (let i = 0; i < this.snapshots.length - 1; i++) {
             if (this.snapshots[i].time <= renderTime && this.snapshots[i+1].time >= renderTime) {
-                prev = this.snapshots[i];
-                next = this.snapshots[i+1];
-                break;
+                const prev = this.snapshots[i];
+                const next = this.snapshots[i+1];
+                const pEnt = prev.entities.get(netId);
+                const nEnt = next.entities.get(netId);
+
+                if (pEnt && nEnt) {
+                    const ratio = (renderTime - prev.time) / (next.time - prev.time);
+                    // Lerp
+                    return {
+                        x: pEnt.x + (nEnt.x - pEnt.x) * ratio,
+                        y: pEnt.y + (nEnt.y - pEnt.y) * ratio,
+                        r: this.lerpAngle(pEnt.r, nEnt.r, ratio),
+                        hp: nEnt.hp
+                    };
+                }
             }
         }
-
-        // If valid window found, interpolate
-        if (prev && next) {
-            const total = next.time - prev.time;
-            const elapsed = renderTime - prev.time;
-            const t = elapsed / total; // 0.0 to 1.0
-
-            return next.entities.map((n: any) => {
-                const p = prev!.entities.find((e: any) => e.netId === n.netId);
-                if (!p) return n; // No previous state, snap to current
-
-                return {
-                    ...n,
-                    x: p.x + (n.x - p.x) * t,
-                    y: p.y + (n.y - p.y) * t,
-                    // Shortest path rotation interpolation
-                    r: this.lerpAngle(p.r, n.r, t)
-                };
-            });
-        }
-
-        // Fallback: Return latest if available
-        if (this.snapshots.length > 0) return this.snapshots[this.snapshots.length - 1].entities;
-        return [];
+        return null;
     }
 
     private lerpAngle(start: number, end: number, t: number) {
@@ -229,21 +156,6 @@ export class NetworkManager {
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
         return start + diff * t;
-    }
-
-    private measurePing() {
-        // WebSocket has no built-in ping API exposed to JS, 
-        // usually handled by heartbeat frames or calculating difference between update timestamps.
-        // Simplified:
-        if (this.snapshots.length >= 2) {
-            const latest = this.snapshots[this.snapshots.length - 1];
-            this.stats.ping = Date.now() - latest.time; 
-            this.emit('net_stat', { ping: this.stats.ping });
-        }
-    }
-
-    disconnect() {
-        this.ws?.close();
     }
 
     on(event: string, fn: Function) {
@@ -254,4 +166,6 @@ export class NetworkManager {
     emit(event: string, data: any) {
         if (this.handlers[event]) this.handlers[event].forEach(fn => fn(data));
     }
+    
+    disconnect() { this.ws?.close(); }
 }
