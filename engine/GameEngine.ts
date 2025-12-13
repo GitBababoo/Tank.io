@@ -291,11 +291,19 @@ export class GameEngine {
     // --- NETWORKING (SEND INPUT) ---
     if (!player.isDead) {
         this.networkManager.syncPlayerState(player.pos, player.vel, player.rotation);
-        this.networkManager.syncPlayerDetails(player.health, player.maxHealth, this.playerManager.state.score, this.playerManager.state.classPath);
+        this.networkManager.syncPlayerDetails(
+            player.health, 
+            player.maxHealth, 
+            this.playerManager.state.score, 
+            this.playerManager.state.classPath,
+            this.playerManager.state.level,
+            this.playerManager.state.xp
+        );
     }
 
     // --- NETWORKING (APPLY INTERPOLATION) ---
-    this.networkManager.processInterpolation(entities);
+    // UPDATED: Pass dt for extrapolation logic
+    this.networkManager.processInterpolation(entities, dt);
 
     const handleDeath = (v: Entity, k: Entity) => {
         this.deathManager.handleDeath(v, k, this.entityManager.entities);

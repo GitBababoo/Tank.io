@@ -1,7 +1,3 @@
-import { PrismaClient } from '@prisma/client'
-
-const globalForPrisma = globalThis as unknown as { prisma: PrismaClient }
-
-export const prisma = globalForPrisma.prisma || new PrismaClient()
-
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+// Database logic has been moved to the Game Server (components/server/index.ts)
+// utilizing SQLite for high-performance persistence.
+export const prisma = null;

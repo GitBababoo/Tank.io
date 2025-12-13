@@ -20,9 +20,9 @@ export const viewport: Viewport = {
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="en" className="dark h-full w-full overflow-hidden">
       <body className="h-full w-full overflow-hidden bg-[#1a1a1a]">

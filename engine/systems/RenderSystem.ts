@@ -30,6 +30,9 @@ export class RenderSystem {
 
   constructor(canvas: HTMLCanvasElement, transparent: boolean = false) {
     this.canvas = canvas;
+    // PERFORMANCE: 'alpha: false' tells the browser the canvas is opaque.
+    // This allows the browser to optimize compositing significantly.
+    // Only use alpha if we explicitly requested transparency (like for previews).
     this.ctx = canvas.getContext('2d', { alpha: transparent }) as CanvasRenderingContext2D;
     this.transparent = transparent;
     this.colors = {
@@ -58,20 +61,18 @@ export class RenderSystem {
     settings?: GameSettings // Pass settings for performance tuning
   ) {
     const { width, height } = this.canvas;
-    const isLowQuality = settings?.graphics.quality === 'low';
-    const enablePostProcessing = settings?.graphics.postProcessing && !isLowQuality;
+    const quality = settings?.graphics.quality || 'medium';
+    const isHighQuality = quality === 'high';
+    const isLowQuality = quality === 'low';
+    const enablePostProcessing = settings?.graphics.postProcessing && isHighQuality;
 
     // --- RENDER PASS 1: Main Game ---
-    // If post-processing is on, we draw to the offscreen canvas first, but for simplicity/performance in JS Canvas,
-    // we usually draw to main canvas then manipulate it, OR simply apply effects on top.
-    // However, Chromatic Aberration requires reading pixels.
-    // OPTIMIZATION: We will fake "Shockwave" distortion by shifting the camera slightly during the draw pass instead of pixel manipulation.
-    // Real pixel shaders require WebGL. Here we simulate "Glitch" by drawing channels offset.
-
+    
     // 1. Clear Screen
     if (this.transparent) {
         this.ctx.clearRect(0, 0, width, height);
     } else {
+        // Fill rect is faster than clearRect on opaque canvases
         this.ctx.fillStyle = this.colors.background;
         this.ctx.fillRect(0, 0, width, height);
     }
@@ -112,8 +113,8 @@ export class RenderSystem {
     // Layer 3: Tanks & Bosses
     const tanks = entities.filter(e => e.type === EntityType.PLAYER || e.type === EntityType.ENEMY || e.type === EntityType.BOSS);
     
-    // Optimization: Don't use fancy shadows on Low Quality
-    if (!isLowQuality) {
+    // Optimization: Only enable expensive shadows on High Quality
+    if (isHighQuality) {
         this.ctx.shadowBlur = 10;
         this.ctx.shadowColor = 'rgba(0,0,0,0.3)';
     }
@@ -126,11 +127,11 @@ export class RenderSystem {
     // Draw Player explicitly if not in the list
     if (!player.isDead) this.tankRenderer.drawTank(player);
 
-    this.ctx.shadowBlur = 0; // Reset Shadow
+    this.ctx.shadowBlur = 0; // Reset Shadow immediately
 
     // Layer 4: Projectiles & Particles (NEON BLOOM MODE)
     // We enable additive blending here to make overlapping bullets/particles glow intensely
-    // Disabled on Low Quality for performance
+    // Disabled on Low Quality for performance to reduce fill-rate cost
     if (!isLowQuality) {
         this.ctx.globalCompositeOperation = 'lighter';
     }

@@ -1,11 +1,7 @@
-
 "use client";
 
 import React, { useRef, useEffect, useState } from 'react';
 import { GameEngine } from '../engine/GameEngine';
-// ... rest of the file stays exactly the same as provided, just ensure 'use client' is at the top.
-// I will output the beginning to ensure it's applied correctly.
-
 import { PlayerState, StatKey, GameSettings, GameMode, FactionType, EvoRequirement, ServerRegion } from '../types';
 import { DEFAULT_SETTINGS, BASE_STATS } from '../constants';
 import { EVOLUTION_TREE } from '../data/tanks';
@@ -17,7 +13,6 @@ import { ConsoleOverlay } from './ConsoleOverlay';
 import { Scoreboard } from './Scoreboard';
 import { SandboxPanel } from './SandboxPanel'; 
 import { StudioView } from './StudioView'; 
-import { CollapsiblePanel } from './CollapsiblePanel';
 import { MobileControls } from './MobileControls';
 import { PlayerHub } from './PlayerHub';
 import { Minimap } from './Minimap'; 
@@ -50,7 +45,8 @@ export const Game: React.FC = () => {
   const engineRef = useRef<GameEngine | null>(null);
   const mountedRef = useRef(false);
   
-  // Game States
+  const lastUiUpdateRef = useRef(0);
+  
   const [gameState, setGameState] = useState<'LOBBY' | 'CONNECTING' | 'PLAYING' | 'STUDIO'>('LOBBY');
   const [gameMode, setGameMode] = useState<GameMode>('FFA');
   const [faction, setFaction] = useState<FactionType>(FactionType.NONE);
@@ -131,7 +127,6 @@ export const Game: React.FC = () => {
     if (gameState === 'PLAYING' && canvasRef.current && serverRegion) {
         
         if (engineRef.current) {
-            console.log("[GAME] Cleaning up old engine before spawn");
             engineRef.current.destroy();
             engineRef.current = null;
         }
@@ -143,7 +138,6 @@ export const Game: React.FC = () => {
             canvasRef.current.width = window.innerWidth * scale;
             canvasRef.current.height = window.innerHeight * scale;
             
-            console.log("[GAME] Initializing New Engine...");
             const newEngine = new GameEngine(
                 canvasRef.current,
                 settings, 
@@ -152,13 +146,16 @@ export const Game: React.FC = () => {
                 faction,
                 initialClass,
                 (newState) => {
-                    if (mountedRef.current) setPlayerState(newState);
+                    const now = performance.now();
+                    if (now - lastUiUpdateRef.current > 33) { 
+                        if (mountedRef.current) setPlayerState(newState);
+                        lastUiUpdateRef.current = now;
+                    }
                 },
                 minimapRef.current 
             );
             
             newEngine.audioManager.ctx.resume();
-
             newEngine.networkManager.connect(serverRegion, { name: playerName, tank: initialClass, mode: gameMode, faction: faction });
 
             if (isMobile) {
@@ -175,7 +172,6 @@ export const Game: React.FC = () => {
 
     return () => {
       if (engineRef.current) {
-        console.log("[GAME] Destroying Engine");
         engineRef.current.destroy();
         engineRef.current = null;
       }
@@ -364,7 +360,6 @@ export const Game: React.FC = () => {
                 />
             )}
             
-            {/* PAUSE / SETTINGS BUTTON FOR MOBILE */}
             {isMobile && !isDead && (
                 <button 
                     onClick={() => setShowSettings(true)}

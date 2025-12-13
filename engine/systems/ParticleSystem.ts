@@ -2,11 +2,36 @@
 import { Entity, EntityType, ParticleType, Vector2 } from '../../types';
 
 export class ParticleSystem {
+    // PERFORMANCE: Hard limit on particles to prevent memory bloat
+    static MAX_PARTICLES = 200;
     
     // --- OBJECT POOLING OPTIMIZATION ---
     // Instead of creating new objects every frame, we reuse dead ones.
     static spawnParticle(entities: Entity[], template: Partial<Entity>) {
-        // 1. Try to find a dead particle to recycle
+        const particles = entities.filter(e => e.type === EntityType.PARTICLE);
+        
+        // 1. Cap Check: If too many particles, steal the oldest one
+        if (particles.length >= this.MAX_PARTICLES) {
+            // Find oldest or just shift first one
+            const oldest = particles[0];
+            Object.assign(oldest, {
+                isDead: false,
+                opacity: 1.0,
+                rotation: 0,
+                vel: { x: 0, y: 0 },
+                ...template,
+                id: `p_${Math.random()}`
+            });
+            // Move to end of array to rotate pool
+            const idx = entities.indexOf(oldest);
+            if (idx > -1) {
+                entities.splice(idx, 1);
+                entities.push(oldest);
+            }
+            return;
+        }
+
+        // 2. Try to find a dead particle to recycle (standard pool)
         const deadParticle = entities.find(e => e.type === EntityType.PARTICLE && e.isDead);
         
         if (deadParticle) {
@@ -20,7 +45,7 @@ export class ParticleSystem {
                 id: `p_${Math.random()}` // Refresh ID to ensure uniqueness for React keys if needed
             });
         } else {
-            // Create new if pool is empty
+            // Create new if pool is empty and under cap
             entities.push({
                 id: `p_${Math.random()}`,
                 type: EntityType.PARTICLE,

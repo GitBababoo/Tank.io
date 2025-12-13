@@ -1,35 +1,48 @@
-import NextAuth from "next-auth"
-import { prisma } from "@/lib/prisma"
-import { PrismaAdapter } from "@auth/prisma-adapter"
+
+import NextAuth from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 
-// Using V5 Beta syntax or V4 compatible wrapper depending on install
-// This is a standard V5 structure
-const handler = NextAuth({
-  adapter: PrismaAdapter(prisma),
+export const authOptions = {
+  // REMOVED ADAPTER: Running in No-DB Mode
+  // adapter: PrismaAdapter(prisma), 
+  
   providers: [
-    // Simple Guest/Credentials for demo (Replace with Google/GitHub in prod)
     CredentialsProvider({
-        name: "Guest Access",
-        credentials: {
-            username: { label: "Username", type: "text", placeholder: "Player" }
-        },
+        id: "guest",
+        name: "Guest",
+        credentials: {},
         async authorize(credentials, req) {
-            // For this game demo, we just allow anyone as a guest
-            const user = { id: "guest_" + Math.random().toString(36).slice(2), name: credentials?.username || "Guest", email: null };
-            return user;
+            return {
+                id: "guest_" + Date.now(),
+                name: "Guest Commander",
+                email: null,
+                image: null,
+                isGuest: true
+            };
         }
     })
   ],
-  session: { strategy: "jwt" },
   callbacks: {
-      async session({ session, token }) {
-          if (session.user && token.sub) {
-              session.user.id = token.sub; // Pass ID to client
-          }
-          return session;
+    async session({ session, user, token }: any) {
+      if (session.user) {
+        session.user.id = user?.id || token?.sub;
+        session.user.isGuest = true;
       }
-  }
-});
+      return session;
+    },
+    async jwt({ token, user }: any) {
+        if (user) {
+            token.id = user.id;
+        }
+        return token;
+    }
+  },
+  session: {
+    strategy: "jwt",
+  },
+  secret: "dev-secret-key-change-in-prod",
+};
 
-export { handler as GET, handler as POST }
+const handler = NextAuth(authOptions as any);
+
+export { handler as GET, handler as POST };

@@ -1,9 +1,10 @@
-
 import { ServerRegion, GameMode, FactionType, Entity, EntityType } from '../../types';
-import { auth } from '../../firebase';
 import { WORLD_SIZE } from '../../constants';
 
-// --- INTERPOLATION TYPES ---
+// --- BINARY PROTOCOL SCHEMA ---
+// 1. INPUT (Client -> Server): [TYPE:1][VX:f32][VY:f32][ROT:f32][SEQ:u16]
+// 2. WORLD (Server -> Client): [TYPE:2][TIME:f64][COUNT:u16]...[NETID:u16][X:u16][Y:u16][ROT:u8][HP:u8][LAST_SEQ:u16]
+
 interface Snapshot {
     time: number;
     entities: Map<number, EntityState>;
@@ -14,6 +15,9 @@ interface EntityState {
     y: number;
     r: number;
     hpPct: number;
+    vx?: number; 
+    vy?: number; 
+    lastSeq?: number; // Server ack of input
 }
 
 type NetworkEventHandler = (data: any) => void;
@@ -28,54 +32,50 @@ export class NetworkManager {
     
     private ws: WebSocket | null = null;
 
-    // --- SNAPSHOT INTERPOLATION BUFFER ---
     private snapshots: Snapshot[] = [];
-    private netIdMap: Map<number, string> = new Map(); // NetID (short) -> UUID (string)
+    private netIdMap: Map<number, string> = new Map(); 
     
-    // Time Sync
     private serverTimeOffset: number = 0;
-    private renderDelay: number = 100; // 100ms interpolation buffer (standard for smooth .io)
+    private renderDelay: number = 100;
+    
+    private lastInputTime: number = 0;
+    private readonly INPUT_RATE = 1000 / 30; 
+
+    // Sequence Numbering for Deterministic Input
+    private inputSequence: number = 0;
+
+    // Reusable Buffers (Size increased for SEQ)
+    private inputBuffer = new ArrayBuffer(16);
+    private inputView = new DataView(this.inputBuffer);
 
     constructor() {}
 
-    connect(region: ServerRegion, playerInfo: { name: string; tank: string; mode: GameMode; faction: FactionType }) {
-        const userId = auth.currentUser ? auth.currentUser.uid : `guest_${Math.random().toString(36).substr(2, 5)}`;
+    async connect(region: ServerRegion, playerInfo: { name: string; tank: string; mode: GameMode; faction: FactionType }) {
+        const userId = `guest_${Math.random().toString(36).substr(2, 8)}`;
         this.myId = userId;
 
         let wsUrl = region.url;
         if (region.url === 'public') {
              const isHttps = window.location.protocol === 'https:';
              const protocol = isHttps ? 'wss:' : 'ws:';
-             
              let hostname = window.location.hostname;
              let port = window.location.port;
-
-             // DEV FIX: If running on Vite default port (5173), assume backend is on 8080
-             if (port === '5173' && hostname === 'localhost') {
-                 port = '8080';
-             }
-             
-             // Fallback for local development or file:// protocol where host might be empty
-             if (!hostname) {
-                 hostname = 'localhost';
-                 port = '8080';
-             }
-             
+             if (port === '5173' && hostname === 'localhost') port = '8080';
+             if (!hostname) { hostname = 'localhost'; port = '8080'; }
              const portStr = port ? `:${port}` : '';
-             wsUrl = `${protocol}//${hostname}${portStr}`;
+             wsUrl = `${protocol}//${hostname}${portStr}/ws`;
         }
-        wsUrl += `?room=${playerInfo.mode}&uid=${userId}&name=${encodeURIComponent(playerInfo.name)}`;
-
-        console.log(`[NET] Attempting connection to: ${wsUrl}`);
+        
+        wsUrl += `?uid=${userId}&name=${encodeURIComponent(playerInfo.name)}`;
 
         try {
             this.ws = new WebSocket(wsUrl);
-            this.ws.binaryType = "arraybuffer"; 
+            this.ws.binaryType = "arraybuffer";
 
             this.ws.onopen = () => {
-                console.log("[NET] Connected via Binary Protocol");
+                console.log("%c[NET] Connected to Lobby", "color: #0f0; font-weight: bold;");
                 this.isConnected = true;
-                this.emit('connected', { isHost: false });
+                this.joinRoom(playerInfo.mode);
             };
 
             this.ws.onmessage = (event) => {
@@ -85,25 +85,29 @@ export class NetworkManager {
                     try {
                         const msg = JSON.parse(event.data as string);
                         this.handleJsonEvent(msg);
-                    } catch (e) { console.warn("Packet Error", e); }
+                    } catch (e) { }
                 }
             };
             
             this.ws.onclose = (e) => { 
                 this.isConnected = false; 
                 this.emit('disconnected', {}); 
-                if (!e.wasClean) {
-                    console.log(`[NET] Connection closed unexpectedly. Code: ${e.code}, Reason: ${e.reason}`);
-                }
             };
             
             this.ws.onerror = (e) => {
-                // WebSocket errors are often silent in JS for security, but we can log that it happened.
-                console.warn("[NET] Socket Error. If local, ensure 'node server/index.js' is running on port 8080.");
+                console.warn("[NET] Socket Error.");
             };
         } catch (e) {
-            console.error("[NET] Failed to construct WebSocket:", e);
+            console.error("[NET] Connection Failed:", e);
         }
+    }
+
+    private joinRoom(roomName: string) {
+        if (!this.ws) return;
+        this.ws.send(JSON.stringify({
+            t: 'join',
+            d: { room: roomName }
+        }));
     }
 
     disconnect() {
@@ -116,20 +120,25 @@ export class NetworkManager {
         this.netIdMap.clear();
     }
 
-    // --- INCOMING DATA HANDLING ---
-
     private handleJsonEvent(msg: any) {
         if (msg.t === 'hello') {
-            this.myNetId = msg.netId;
-            this.netIdMap.set(msg.netId, this.myId!);
-            console.log(`[NET] Handshake. My NetID: ${this.myNetId}`);
-            
-            // Initial position sync (Teleport)
-            if (msg.x && msg.y) {
-                this.emit('teleport', { x: msg.x, y: msg.y });
+            // Check for restored data
+            if (msg.restore) {
+                console.log("[NET] Restoring Session Data...", msg.restore);
+                // Important: Engine listens to this to restore class/level
+                this.emit('restore_data', msg.restore);
             }
         }
+        else if (msg.t === 'stats') {
+            this.emit('server_stats', msg.d);
+        }
         else if (msg.t === 'init') {
+            if (msg.self) {
+                this.myNetId = msg.self.netId;
+                this.netIdMap.set(msg.self.netId, this.myId!);
+                this.emit('teleport', { x: msg.self.x, y: msg.self.y });
+                this.emit('connected', { isHost: false });
+            }
             msg.d.forEach((p: any) => {
                 this.netIdMap.set(p.netId, p.id);
                 this.emit('player_joined', p);
@@ -153,7 +162,7 @@ export class NetworkManager {
 
         const type = view.getUint8(offset); offset += 1;
 
-        if (type === 2) { // MSG_WORLD_UPDATE
+        if (type === 2) { 
             const serverTime = view.getFloat64(offset, true); offset += 8;
             const count = view.getUint16(offset, true); offset += 2;
 
@@ -162,61 +171,76 @@ export class NetworkManager {
                 entities: new Map()
             };
 
-            // Calculate Time Offset (Moving Average) to sync clocks
-            const now = Date.now();
-            const latency = now - serverTime; 
-            // We assume one-way latency is roughly half of RTT, but for simplified sync:
-            // renderTime = serverTime - buffer. 
-            // We just store serverTime relative to local time.
-            // Simple approach: Use server timestamps directly for interpolation.
-
             for (let i = 0; i < count; i++) {
                 const netId = view.getUint16(offset, true); offset += 2;
                 
-                // Decompression: 0-65535 -> 0-WORLD_SIZE
                 const cx = view.getUint16(offset, true); offset += 2;
                 const cy = view.getUint16(offset, true); offset += 2;
                 
-                const x = (cx / 65535) * 5000; // Hardcoded WORLD_SIZE for now, should be config
-                const y = (cy / 65535) * 5000;
+                const x = (cx / 65535) * WORLD_SIZE; 
+                const y = (cy / 65535) * WORLD_SIZE;
 
-                // Decompression: 0-255 -> -PI to PI
                 const rotByte = view.getUint8(offset); offset += 1;
                 const r = (rotByte / 255) * (Math.PI * 2) - Math.PI;
 
                 const hpPct = view.getUint8(offset); offset += 1;
+                
+                // Get Last Processed Input Sequence (for Reconciliation)
+                const lastSeq = view.getUint16(offset, true); offset += 2;
 
-                snapshot.entities.set(netId, { x, y, r, hpPct });
+                snapshot.entities.set(netId, { x, y, r, hpPct, lastSeq });
+            }
+
+            if (this.snapshots.length > 0) {
+                const prev = this.snapshots[this.snapshots.length - 1];
+                const dt = (serverTime - prev.time) / 1000;
+                if (dt > 0) {
+                    snapshot.entities.forEach((state, netId) => {
+                        const prevState = prev.entities.get(netId);
+                        if (prevState) {
+                            state.vx = (state.x - prevState.x) / dt;
+                            state.vy = (state.y - prevState.y) / dt;
+                        } else {
+                            state.vx = 0; state.vy = 0;
+                        }
+                    });
+                }
             }
 
             this.snapshots.push(snapshot);
-            // Limit buffer size
             if (this.snapshots.length > 20) this.snapshots.shift();
         }
     }
 
-    // --- OUTGOING DATA HANDLING (Binary) ---
-    
-    // Pre-allocate buffer for performance
-    private inputBuffer = new ArrayBuffer(13);
-    private inputView = new DataView(this.inputBuffer);
-
     syncPlayerState(pos: {x: number, y: number}, vel: {x: number, y: number}, rotation: number) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-        // Protocol: [Type(1)][VX(4)][VY(4)][Rot(4)]
-        this.inputView.setUint8(0, 1); // MSG_INPUT
+        const now = Date.now();
+        if (now - this.lastInputTime < this.INPUT_RATE) return;
+        this.lastInputTime = now;
+
+        this.inputSequence++;
+        if (this.inputSequence > 65535) this.inputSequence = 0;
+
+        // Protocol: [1][VX][VY][ROT][SEQ] (15 bytes)
+        this.inputView.setUint8(0, 1); 
         this.inputView.setFloat32(1, vel.x, true);
         this.inputView.setFloat32(5, vel.y, true);
         this.inputView.setFloat32(9, rotation, true);
+        this.inputView.setUint16(13, this.inputSequence, true); // Send Seq
 
         this.ws.send(this.inputBuffer);
     }
     
-    syncPlayerDetails(health: number, maxHealth: number, score: number, classPath: string) {
-        // Low priority sync via JSON
-        if (this.ws && this.ws.readyState === WebSocket.OPEN && Math.random() < 0.02) { // Once every ~50 frames
-             this.ws.send(JSON.stringify({ t: 's', d: { hp: health, maxHp: maxHealth, score, classPath } }));
+    // Sync persistence data to server
+    syncPlayerDetails(health: number, maxHealth: number, score: number, classPath: string, level: number, xp: number) {
+        // Send occassionally via JSON to keep server memory updated
+        // 5% chance per frame (~1-2 times per second) is enough
+        if (this.ws && Math.random() < 0.05) {
+             this.ws.send(JSON.stringify({
+                 t: 'update_stat',
+                 d: { level, xp, classPath, score }
+             }));
         }
     }
 
@@ -226,84 +250,59 @@ export class NetworkManager {
         }
     }
 
-    // --- INTERPOLATION ENGINE (The Magic) ---
-    
-    public processInterpolation(entities: Entity[]) {
-        if (this.snapshots.length < 2) return;
+    public processInterpolation(entities: Entity[], dt: number) {
+        const renderTime = this.snapshots.length > 0 ? this.snapshots[this.snapshots.length - 1].time - this.renderDelay : 0;
 
-        // We render at (CurrentTime - renderDelay).
-        // This ensures we always have a "next" snapshot to interpolate towards.
-        const now = Date.now();
-        // Server time estimation: Take the latest snapshot time and subtract elapsed real time?
-        // Simpler approach: Use the timestamps in the snapshots.
-        // The render time is defined by the latest snapshot's time minus buffer.
-        const latestTime = this.snapshots[this.snapshots.length - 1].time;
-        const renderTime = latestTime - this.renderDelay;
-
-        // 1. Find the two snapshots surrounding renderTime
         let prev: Snapshot | null = null;
         let next: Snapshot | null = null;
 
-        for (let i = this.snapshots.length - 2; i >= 0; i--) {
+        for (let i = this.snapshots.length - 1; i >= 0; i--) {
             if (this.snapshots[i].time <= renderTime) {
                 prev = this.snapshots[i];
-                next = this.snapshots[i + 1];
+                if (i + 1 < this.snapshots.length) {
+                    next = this.snapshots[i + 1];
+                }
                 break;
             }
         }
 
-        // If we don't have data (lag spike), extrapolate or snap to latest
-        if (!prev || !next) {
-            // Fallback: Snap to latest
-            /*
-            const snap = this.snapshots[this.snapshots.length - 1];
-            snap.entities.forEach((state, netId) => {
-                this.updateEntity(entities, netId, state, 1.0); // Snap
-            });
-            */
-            return;
-        }
+        if (!next || !prev) return;
 
-        // 2. Calculate Interpolation Alpha (0.0 to 1.0)
-        const total = next.time - prev.time;
-        const current = renderTime - prev.time;
-        const alpha = Math.max(0, Math.min(1, current / total));
+        const totalWindow = next.time - prev.time;
+        const timeIntoWindow = renderTime - prev.time;
+        const alpha = Math.max(0, Math.min(1, timeIntoWindow / totalWindow));
 
-        // 3. Apply to Entities
         next.entities.forEach((nextState, netId) => {
+            // For Reconciliation: We could check nextState.lastSeq here
+            // But for simple smoothing, we still skip self if prediction is enabled
+            if (netId === this.myNetId) return;
+
+            const stringId = this.netIdMap.get(netId);
+            if (!stringId) return;
+
+            const entity = entities.find(e => e.id === stringId);
             const prevState = prev!.entities.get(netId);
-            if (prevState) {
-                this.updateEntity(entities, netId, prevState, nextState, alpha);
+
+            if (entity && prevState) {
+                const targetX = prevState.x + (nextState.x - prevState.x) * alpha;
+                const targetY = prevState.y + (nextState.y - prevState.y) * alpha;
+                
+                if (Math.abs(targetX - entity.pos.x) > 500) {
+                    entity.pos.x = targetX;
+                    entity.pos.y = targetY;
+                } else {
+                    entity.pos.x = targetX;
+                    entity.pos.y = targetY;
+                }
+                
+                let da = nextState.r - prevState.r;
+                while (da > Math.PI) da -= Math.PI * 2;
+                while (da < -Math.PI) da += Math.PI * 2;
+                entity.rotation = prevState.r + da * alpha;
+
+                entity.health = (nextState.hpPct / 100) * entity.maxHealth;
             }
         });
-    }
-
-    private updateEntity(entities: Entity[], netId: number, prev: EntityState, next: EntityState, alpha: number) {
-        // Skip local player (Prediction handles it)
-        if (netId === this.myNetId) {
-            // Optional: Implement Server Reconciliation here (Correct position if drifting)
-            // For now, we trust client prediction for responsiveness
-            return;
-        }
-
-        const stringId = this.netIdMap.get(netId);
-        if (!stringId) return;
-
-        const entity = entities.find(e => e.id === stringId);
-        if (entity) {
-            // Pos
-            entity.pos.x = prev.x + (next.x - prev.x) * alpha;
-            entity.pos.y = prev.y + (next.y - prev.y) * alpha;
-            
-            // Rotation (Handle wrapping)
-            let da = next.r - prev.r;
-            if (da > Math.PI) da -= Math.PI * 2;
-            if (da < -Math.PI) da += Math.PI * 2;
-            entity.rotation = prev.r + da * alpha;
-
-            // Health
-            entity.health = (next.hpPct / 100) * entity.maxHealth;
-        }
     }
 
     on(event: string, handler: NetworkEventHandler) {
