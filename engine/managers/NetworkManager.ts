@@ -4,15 +4,13 @@ import Peer, { DataConnection } from 'peerjs';
 
 type NetworkEventHandler = (data: any) => void;
 
-// --- PROTOCOL CODES ---
-// Using numbers to save bandwidth
 const OP_JOIN = 1;
-const OP_UPDATE = 2; // World State (Pos, HP, etc)
-const OP_INPUT = 3;  // Player Input (Keys, Mouse)
+const OP_UPDATE = 2; 
+const OP_INPUT = 3;  
 const OP_CHAT = 4;
 const OP_PING = 5;
 const OP_PONG = 6;
-const OP_LEADERBOARD = 7; // NEW: Dedicated Leaderboard Channel
+const OP_LEADERBOARD = 7; 
 
 export class NetworkManager {
     private handlers: Record<string, NetworkEventHandler[]> = {};
@@ -24,7 +22,6 @@ export class NetworkManager {
     private connections: DataConnection[] = []; 
     private hostConn: DataConnection | null = null;
 
-    // Monitoring Stats
     public latency: number = 0;
     public connectedPeers: number = 0;
 
@@ -66,7 +63,6 @@ export class NetworkManager {
                     this.isConnected = true;
                     this.hostConn = conn;
                     
-                    // Send initial Join Request
                     conn.send({
                         op: OP_JOIN,
                         data: { 
@@ -97,7 +93,7 @@ export class NetworkManager {
             } else if (raw.op === OP_INPUT) {
                 this.emit('remote_input', { id: conn.peer, ...raw.data });
             } else if (raw.op === OP_CHAT) {
-                this.broadcast({ op: OP_CHAT, data: raw.data }); // Echo to others
+                this.broadcast({ op: OP_CHAT, data: raw.data });
                 this.emit('chat_message', raw.data);
             } else if (raw.op === OP_PING) {
                 conn.send({ op: OP_PONG, t: raw.t });
@@ -120,7 +116,6 @@ export class NetworkManager {
         if (raw.op === OP_UPDATE) {
             this.emit('world_update', raw.data);
         } else if (raw.op === OP_LEADERBOARD) {
-            // NEW: Receive Leaderboard data from Host
             this.emit('leaderboard_update', raw.data);
         } else if (raw.op === OP_CHAT) {
             this.emit('chat_message', raw.data);
@@ -141,13 +136,12 @@ export class NetworkManager {
         }
     }
 
-    // --- BROADCAST FUNCTIONS (Host Only) ---
+    // --- BROADCAST FUNCTIONS ---
 
-    // 1. High Frequency: World Positions (60Hz or 30Hz)
     public broadcastWorldState(entities: Entity[]) {
         if (!this.isHost || this.connections.length === 0) return;
         
-        // Optimize: Send only necessary data, round numbers
+        // OPTIMIZATION: Round coordinates to reduce packet size
         const snapshot = entities.map(e => ({
             id: e.id,
             t: e.type,
@@ -165,7 +159,6 @@ export class NetworkManager {
         this.broadcast({ op: OP_UPDATE, data: snapshot });
     }
 
-    // 2. Low Frequency: Leaderboard (1Hz) - NEW FUNCTION
     public broadcastLeaderboard(leaderboardData: any[]) {
         if (!this.isHost || this.connections.length === 0) return;
         this.broadcast({ op: OP_LEADERBOARD, data: leaderboardData });
@@ -174,8 +167,6 @@ export class NetworkManager {
     private broadcast(msg: any) {
         this.connections.forEach(c => { if (c.open) c.send(msg); });
     }
-
-    // --- CLIENT FUNCTIONS ---
 
     public sendClientInput(input: any) {
         if (this.hostConn?.open) this.hostConn.send({ op: OP_INPUT, data: input });
