@@ -1,3 +1,4 @@
+
 "use client";
 
 import React, { useRef, useEffect, useState } from 'react';
@@ -18,6 +19,7 @@ import { PlayerHub } from './PlayerHub';
 import { Minimap } from './Minimap'; 
 import { IngameOverlay } from './IngameOverlay'; 
 import { LoadingScreen } from './LoadingScreen';
+import { Copy } from 'lucide-react';
 
 const initialPlayerState: PlayerState = {
     level: 1, xp: 0, xpToNext: 100, score: 0, availablePoints: 0,
@@ -57,6 +59,11 @@ export const Game: React.FC = () => {
   const [showConsole, setShowConsole] = useState(false); 
   const [settings, setSettings] = useState<GameSettings>(DEFAULT_SETTINGS);
   
+  // P2P State
+  const [isHost, setIsHost] = useState(false);
+  const [hostIdToJoin, setHostIdToJoin] = useState<string | undefined>(undefined);
+  const [myRoomId, setMyRoomId] = useState<string>("");
+
   const [isMobile, setIsMobile] = useState(false);
   const [spectatingName, setSpectatingName] = useState("Unknown");
 
@@ -80,24 +87,16 @@ export const Game: React.FC = () => {
   const [playerState, setPlayerState] = useState<PlayerState>(initialPlayerState);
   const isDead = playerState.deathDetails !== undefined;
 
-  useEffect(() => {
-      if (gameState === 'PLAYING' && isDead) {
-          const interval = setInterval(() => {
-              if (engineRef.current) {
-                  const name = engineRef.current.cameraManager.getSpectatingName(engineRef.current.entityManager.entities);
-                  setSpectatingName(name);
-              }
-          }, 500);
-          return () => clearInterval(interval);
-      }
-  }, [gameState, isDead]);
-
-  const handleLobbyStart = (name: string, mode: GameMode, faction: FactionType, selectedClass: string, region: ServerRegion) => {
+  // Handle Lobby Start
+  const handleLobbyStart = (name: string, mode: GameMode, faction: FactionType, selectedClass: string, region: ServerRegion, host: boolean, hostId?: string) => {
     setPlayerName(name || 'Player');
     setGameMode(mode);
     setFaction(faction);
     setInitialClass(selectedClass);
     setServerRegion(region);
+    
+    setIsHost(host);
+    setHostIdToJoin(hostId);
     
     setGameState('CONNECTING');
   };
@@ -106,21 +105,7 @@ export const Game: React.FC = () => {
       setGameState('PLAYING');
   };
 
-  useEffect(() => {
-      const handleResize = () => {
-          if (canvasRef.current) {
-              const scale = settings.graphics.resolutionScale || 1.0;
-              canvasRef.current.width = window.innerWidth * scale;
-              canvasRef.current.height = window.innerHeight * scale;
-              canvasRef.current.style.width = '100%';
-              canvasRef.current.style.height = '100%';
-          }
-      };
-      window.addEventListener('resize', handleResize);
-      if (gameState === 'PLAYING') handleResize(); 
-      return () => window.removeEventListener('resize', handleResize);
-  }, [settings.graphics.resolutionScale, gameState]); 
-
+  // Init Engine
   useEffect(() => {
     mountedRef.current = true;
 
@@ -156,7 +141,16 @@ export const Game: React.FC = () => {
             );
             
             newEngine.audioManager.ctx.resume();
-            newEngine.networkManager.connect(serverRegion, { name: playerName, tank: initialClass, mode: gameMode, faction: faction });
+            
+            // --- P2P CONNECTION LOGIC ---
+            if (isHost) {
+                newEngine.networkManager.hostGame({ name: playerName, mode: gameMode })
+                    .then(id => setMyRoomId(id))
+                    .catch(err => { alert("Failed to host: " + err); setGameState('LOBBY'); });
+            } else if (hostIdToJoin) {
+                newEngine.networkManager.joinGame(hostIdToJoin, { name: playerName, tank: initialClass, faction })
+                    .catch(err => { alert("Failed to join: " + err); setGameState('LOBBY'); });
+            }
 
             if (isMobile) {
                 newEngine.cameraManager.targetZoom = 0.8;
@@ -178,6 +172,7 @@ export const Game: React.FC = () => {
     };
   }, [gameState, gameMode, faction, initialClass, serverRegion]); 
 
+  // ... (Keep existing handlers for upgrade, evolve, etc.)
   const updateSettings = (newSettings: GameSettings) => {
     setSettings(newSettings);
     if (engineRef.current) {
@@ -239,20 +234,6 @@ export const Game: React.FC = () => {
       if(name) setSpectatingName(name);
   };
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setShowSettings(prev => !prev);
-      }
-      if (e.key === 'Home') {
-          e.preventDefault();
-          setShowConsole(prev => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-  
   const evolutionOptions = EVOLUTION_TREE[playerState.classPath] || [];
   const getProgress = (req: EvoRequirement): { met: boolean } => {
     let current = 0;
@@ -279,7 +260,7 @@ export const Game: React.FC = () => {
       
       {gameState === 'CONNECTING' && serverRegion && (
           <LoadingScreen 
-              serverName={serverRegion.name} 
+              serverName={isHost ? "Creating Room..." : "Joining Host..."} 
               onComplete={handleConnectionComplete} 
           />
       )}
@@ -296,6 +277,20 @@ export const Game: React.FC = () => {
               tabIndex={0} 
             />
             
+            {/* ROOM ID OVERLAY (Host Only) */}
+            {isHost && myRoomId && (
+                <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-black/60 backdrop-blur px-4 py-2 rounded-full border border-green-500/50 shadow-lg pointer-events-auto">
+                    <span className="text-[10px] font-bold text-green-400 uppercase tracking-widest">Room ID:</span>
+                    <span className="font-mono font-bold text-white select-all">{myRoomId}</span>
+                    <button 
+                        onClick={() => { navigator.clipboard.writeText(myRoomId); alert("Copied!"); }}
+                        className="p-1 hover:text-green-300 text-slate-400 transition-colors"
+                    >
+                        <Copy size={14} />
+                    </button>
+                </div>
+            )}
+
             {engineRef.current && (
                 <IngameOverlay chatManager={engineRef.current.chatManager} />
             )}
@@ -335,7 +330,8 @@ export const Game: React.FC = () => {
                  {!isDead && <HUD playerState={playerState} />}
             </div>
             
-            {gameMode === 'SANDBOX' && !isDead && (
+            {/* Sandbox panel available only to Host */}
+            {gameMode === 'SANDBOX' && !isDead && isHost && (
                <SandboxPanel 
                     playerState={playerState}
                     onCheatLevelUp={() => engineRef.current?.cheatLevelUp()}
@@ -376,8 +372,8 @@ export const Game: React.FC = () => {
           settings={settings} 
           onUpdate={updateSettings} 
           onClose={() => setShowSettings(false)}
-          onSpawnBoss={gameState === 'PLAYING' ? handleSpawnBoss : undefined}
-          onCloseArena={gameState === 'PLAYING' ? handleCloseArena : undefined}
+          onSpawnBoss={gameState === 'PLAYING' && isHost ? handleSpawnBoss : undefined}
+          onCloseArena={gameState === 'PLAYING' && isHost ? handleCloseArena : undefined}
           onExitGame={gameState === 'PLAYING' ? handleBackToLobby : undefined} 
         />
       )}

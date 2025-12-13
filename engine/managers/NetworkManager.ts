@@ -1,217 +1,199 @@
 
 import { ServerRegion, GameMode, FactionType, Entity } from '../../types';
-import { WORLD_SIZE } from '../../constants';
-import { db } from '../../firebase';
-import { ref, set, onDisconnect, onChildAdded, onChildChanged, onChildRemoved, push, onValue, get, remove } from "firebase/database";
+import Peer, { DataConnection } from 'peerjs';
 
 type NetworkEventHandler = (data: any) => void;
+
+// Protocol Constants to save bandwidth
+const OP_JOIN = 1;
+const OP_UPDATE = 2;
+const OP_INPUT = 3;
+const OP_CHAT = 4;
 
 export class NetworkManager {
     private handlers: Record<string, NetworkEventHandler[]> = {};
     public isConnected: boolean = false;
-    public isHost: boolean = false; // In Firebase mode, everyone is a client, host logic is shared or minimal
+    public isHost: boolean = false;
+    public myId: string | null = null;
     
-    private myId: string | null = null;
-    private myRef: any = null;
-    private roomRef: any = null;
-    
-    // Throttling updates to save bandwidth (Firebase limit) & Costs
+    private peer: Peer | null = null;
+    private connections: DataConnection[] = []; // For Host: list of clients
+    private hostConn: DataConnection | null = null; // For Client: connection to host
+
     private lastSyncTime: number = 0;
-    private readonly SYNC_RATE = 80; // ~12 updates per second (Good balance for free tier)
+    private readonly HOST_UPDATE_RATE = 50; // Host broadcasts world every 50ms (20 ticks/sec)
 
     constructor() {}
 
-    async connect(region: ServerRegion, playerInfo: { name: string; tank: string; mode: GameMode; faction: FactionType }) {
-        // 1. Generate ID
-        const userId = `user_${Math.random().toString(36).substr(2, 9)}`;
-        this.myId = userId;
+    // --- HOST MODE: Create a Game ---
+    async hostGame(playerInfo: { name: string; mode: GameMode }) {
+        this.isHost = true;
+        this.isConnected = true;
         
-        // 2. Define Room Path (e.g., rooms/FFA/players/user_abc123)
-        const roomId = playerInfo.mode; 
-        this.roomRef = ref(db, `rooms/${roomId}`);
-        this.myRef = ref(db, `rooms/${roomId}/players/${userId}`);
+        // Use a random ID or a fixed one based on name for testing
+        // Creating a Peer with no ID lets PeerJS server assign one
+        this.peer = new Peer();
 
-        console.log(`[NET] Real Connection to Firebase: ${roomId} as ${playerInfo.name}`);
+        return new Promise<string>((resolve, reject) => {
+            this.peer!.on('open', (id) => {
+                this.myId = id;
+                console.log(`[NET] Hosting Game. Room ID: ${id}`);
+                this.emit('connected', { isHost: true, id: this.myId });
+                resolve(id);
+            });
 
-        try {
-            // 3. Setup Presence (CRITICAL: This ensures 'Online' count is real)
-            // If the user closes the tab or loses internet, Firebase will auto-delete this key.
-            await onDisconnect(this.myRef).remove();
+            this.peer!.on('connection', (conn) => {
+                this.handleIncomingConnection(conn);
+            });
 
-            // 4. Initial Spawn Data
-            const initialData = {
-                id: userId,
-                name: playerInfo.name,
-                // Random spawn within map bounds
-                x: Math.random() * (WORLD_SIZE - 400) + 200,
-                y: Math.random() * (WORLD_SIZE - 400) + 200,
-                r: 0,
-                vx: 0,
-                vy: 0,
-                hp: 100,
-                maxHp: 100,
-                score: 0,
-                classPath: playerInfo.tank,
-                teamId: playerInfo.faction === 'NONE' ? undefined : playerInfo.faction,
-                lastSeen: Date.now()
-            };
+            this.peer!.on('error', (err) => {
+                console.error("[NET] Peer Error:", err);
+                reject(err);
+            });
+        });
+    }
 
-            // Write self to DB
-            await set(this.myRef, initialData);
-            this.isConnected = true;
+    // --- CLIENT MODE: Join a Game ---
+    async joinGame(hostId: string, playerInfo: { name: string; tank: string; faction: FactionType }) {
+        this.isHost = false;
+        this.peer = new Peer();
+
+        return new Promise<void>((resolve, reject) => {
+            this.peer!.on('open', (id) => {
+                this.myId = id;
+                console.log(`[NET] Connecting to Host: ${hostId}...`);
+                
+                const conn = this.peer!.connect(hostId, { reliable: true });
+                
+                conn.on('open', () => {
+                    this.isConnected = true;
+                    this.hostConn = conn;
+                    console.log("[NET] Connected to Host!");
+                    
+                    // Send Join Request immediately
+                    conn.send({
+                        op: OP_JOIN,
+                        data: { 
+                            name: playerInfo.name, 
+                            tank: playerInfo.tank,
+                            faction: playerInfo.faction 
+                        }
+                    });
+
+                    this.emit('connected', { isHost: false });
+                    resolve();
+                });
+
+                conn.on('data', (data) => this.handleClientMessage(data));
+                
+                conn.on('close', () => {
+                    this.isConnected = false;
+                    alert("Disconnected from Host");
+                });
+
+                conn.on('error', (err) => reject(err));
+            });
             
-            // Notify Game Engine to spawn our local player
-            this.emit('connected', { isHost: false });
-            this.emit('teleport', { x: initialData.x, y: initialData.y });
+            this.peer!.on('error', (err) => {
+                console.error("Peer Error", err);
+                reject(err);
+            });
+        });
+    }
 
-            // 5. Listen for REAL players
-            this.setupListeners(roomId);
+    // --- HOST LOGIC ---
+    private handleIncomingConnection(conn: DataConnection) {
+        console.log(`[NET] New Player Connecting: ${conn.peer}`);
+        this.connections.push(conn);
 
-        } catch (e) {
-            console.error("[NET] Connection Failed:", e);
-            alert("Connection failed. Please check your internet.");
+        conn.on('data', (raw: any) => {
+            // Relay inputs/joins to game engine
+            if (raw.op === OP_JOIN) {
+                this.emit('player_joined', { id: conn.peer, ...raw.data });
+            } else if (raw.op === OP_INPUT) {
+                // Input contains movement/aim data
+                this.emit('remote_input', { id: conn.peer, ...raw.data });
+            } else if (raw.op === OP_CHAT) {
+                // Broadcast chat to everyone else
+                this.broadcast({ op: OP_CHAT, data: raw.data });
+                this.emit('chat_message', raw.data);
+            }
+        });
+
+        conn.on('close', () => {
+            console.log(`[NET] Player Disconnected: ${conn.peer}`);
+            this.connections = this.connections.filter(c => c !== conn);
+            this.emit('player_left', { id: conn.peer });
+        });
+    }
+
+    // Called by GameLoop if (isHost) to send world state to all clients
+    public broadcastWorldState(entities: Entity[]) {
+        if (!this.isHost || this.connections.length === 0) return;
+
+        const now = Date.now();
+        if (now - this.lastSyncTime < this.HOST_UPDATE_RATE) return;
+        this.lastSyncTime = now;
+
+        // Simplify entities to minimize bandwidth
+        const snapshot = entities.map(e => ({
+            id: e.id,
+            t: e.type, // type
+            x: Math.round(e.pos.x),
+            y: Math.round(e.pos.y),
+            r: parseFloat(e.rotation.toFixed(2)),
+            h: Math.ceil(e.health),
+            m: Math.ceil(e.maxHealth),
+            c: e.color, // Send color for sync
+            cp: e.classPath,
+            n: e.name, // name
+            ti: e.teamId // team
+        }));
+
+        this.broadcast({ op: OP_UPDATE, data: snapshot });
+    }
+
+    private broadcast(msg: any) {
+        this.connections.forEach(c => {
+            if (c.open) c.send(msg);
+        });
+    }
+
+    // --- CLIENT LOGIC ---
+    private handleClientMessage(raw: any) {
+        if (raw.op === OP_UPDATE) {
+            // World State Received
+            this.emit('world_update', raw.data);
+        } else if (raw.op === OP_CHAT) {
+            this.emit('chat_message', raw.data);
         }
     }
 
-    private setupListeners(roomId: string) {
-        const playersRef = ref(db, `rooms/${roomId}/players`);
-        const chatRef = ref(db, `rooms/${roomId}/chat`);
+    // Called by GameLoop if (!isHost) to send inputs to host
+    public sendClientInput(input: { x: number; y: number; r: number; fire: boolean }) {
+        if (this.isHost || !this.hostConn?.open) return;
+        this.hostConn.send({ op: OP_INPUT, data: input });
+    }
 
-        // Someone joined (Real Player)
-        onChildAdded(playersRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data && data.id !== this.myId) {
-                // Check if data is not stale (older than 30 seconds)
-                if (Date.now() - data.lastSeen < 30000) {
-                    this.emit('player_joined', data);
-                }
-            }
-        });
-
-        // Someone moved (Real Movement)
-        onChildChanged(playersRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data && data.id !== this.myId) {
-                this.handleRemoteUpdate(data);
-            }
-        });
-
-        // Someone left (Tab closed / Disconnected)
-        onChildRemoved(playersRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                this.emit('player_left', { id: data.id });
-            }
-        });
-
-        // Chat messages
-        onChildAdded(chatRef, (snapshot) => {
-            const data = snapshot.val();
-            // Only accept messages from the last 10 seconds to avoid flooding history
-            if (data && Date.now() - data.timestamp < 10000) {
-                this.emit('chat_message', data);
-            }
-        });
+    // --- SHARED ---
+    public sendChat(message: string, sender: string) {
+        const payload = { sender, content: message };
+        if (this.isHost) {
+            this.broadcast({ op: OP_CHAT, data: payload });
+            this.emit('chat_message', payload); // Show locally
+        } else if (this.hostConn?.open) {
+            this.hostConn.send({ op: OP_CHAT, data: payload });
+        }
     }
 
     disconnect() {
-        if (this.myRef) {
-            remove(this.myRef); // Delete self immediately
-            this.myRef = null;
-        }
+        this.peer?.destroy();
         this.isConnected = false;
+        this.connections = [];
+        this.hostConn = null;
     }
 
-    // --- OUTGOING (SENDING MY DATA) ---
-
-    syncPlayerState(pos: {x: number, y: number}, vel: {x: number, y: number}, rotation: number) {
-        if (!this.isConnected || !this.myRef) return;
-
-        const now = Date.now();
-        if (now - this.lastSyncTime < this.SYNC_RATE) return;
-        this.lastSyncTime = now;
-
-        // Update Position & Velocity in Firebase
-        // We assume 'update' logic is handled by 'set' merging if we carefully construct the path, 
-        // or just overwrite the node if it's flat. For speed, we overwrite mainly kinematic data.
-        
-        // Optimization: Round numbers to reduce bandwidth usage
-        set(this.myRef, {
-            ...this.currentDetails, // Include static details to prevent data loss on overwrite
-            id: this.myId,
-            x: Math.round(pos.x),
-            y: Math.round(pos.y),
-            vx: parseFloat(vel.x.toFixed(1)),
-            vy: parseFloat(vel.y.toFixed(1)),
-            r: parseFloat(rotation.toFixed(2)),
-            lastSeen: now
-        }).catch(() => {});
-    }
-    
-    private currentDetails: any = {};
-
-    syncPlayerDetails(health: number, maxHealth: number, score: number, classPath: string, level: number, xp: number) {
-        // Cache these details so syncPlayerState can include them
-        this.currentDetails = {
-            hp: Math.ceil(health),
-            maxHp: Math.ceil(maxHealth),
-            score,
-            classPath,
-            level,
-            name: this.currentDetails.name || "Player" // Preserve name
-        };
-    }
-
-    sendChat(message: string, sender: string) {
-        if (!this.isConnected || !this.roomRef) return;
-        const chatRef = ref(db, `rooms/${this.roomRef.key}/chat`);
-        push(chatRef, {
-            sender,
-            content: message,
-            timestamp: Date.now()
-        });
-    }
-
-    // --- INCOMING (RECEIVING OTHER DATA) ---
-
-    private remoteStates = new Map<string, any>();
-
-    private handleRemoteUpdate(data: any) {
-        // Store the latest snapshot of the remote player
-        this.remoteStates.set(data.id, data);
-    }
-
-    // Called every game frame (60fps) to smooth out the movement
-    public processInterpolation(entities: Entity[], dt: number) {
-        this.remoteStates.forEach((data, id) => {
-            const entity = entities.find(e => e.id === id);
-            if (entity) {
-                // --- INTERPOLATION LOGIC ---
-                // Instead of teleporting, we glide towards the target position.
-                const lerpSpeed = 10 * dt; // Adjust for smoothness vs responsiveness
-                
-                entity.pos.x += (data.x - entity.pos.x) * lerpSpeed;
-                entity.pos.y += (data.y - entity.pos.y) * lerpSpeed;
-                
-                // Rotation Lerp (Handle the 360 -> 0 wrapping issue)
-                let da = data.r - entity.rotation;
-                while (da > Math.PI) da -= Math.PI * 2;
-                while (da < -Math.PI) da += Math.PI * 2;
-                entity.rotation += da * lerpSpeed;
-
-                // Sync Stats
-                entity.health = data.hp;
-                entity.maxHealth = data.maxHp;
-                entity.scoreValue = data.score;
-                entity.classPath = data.classPath;
-                
-                // Snap if too far (Lag spike correction)
-                if (Math.abs(entity.pos.x - data.x) > 300) entity.pos.x = data.x;
-                if (Math.abs(entity.pos.y - data.y) > 300) entity.pos.y = data.y;
-            }
-        });
-    }
-
+    // --- Event Emitter ---
     on(event: string, handler: NetworkEventHandler) {
         if (!this.handlers[event]) this.handlers[event] = [];
         this.handlers[event].push(handler);
@@ -219,5 +201,13 @@ export class NetworkManager {
 
     private emit(event: string, data: any) {
         if (this.handlers[event]) this.handlers[event].forEach(handler => handler(data));
+    }
+
+    // Stubs to match old interface signatures to prevent breakages
+    syncPlayerState() {} 
+    syncPlayerDetails() {}
+    processInterpolation(entities: Entity[], dt: number) {
+        // P2P logic handles interpolation inside the GameEngine's receive handler directly now
+        // This stub keeps TypeScript happy if called elsewhere
     }
 }

@@ -6,12 +6,10 @@ import { TankGallery } from './TankGallery';
 import { BossGallery } from './BossGallery';
 import { LegalModal } from './LegalModal';
 import { PrivacyModal } from './PrivacyModal';
-import { Settings, Book, Database, Sword, Play, Globe } from 'lucide-react';
-import { db } from '../firebase'; // Import real DB
-import { ref, onValue } from 'firebase/database';
+import { Settings, Book, Database, Sword, Play, Users, Copy, Check } from 'lucide-react';
 
 interface LobbyViewProps {
-  onStart: (name: string, mode: GameMode, faction: FactionType, selectedClass: string, region: ServerRegion) => void;
+  onStart: (name: string, mode: GameMode, faction: FactionType, selectedClass: string, region: ServerRegion, isHost: boolean, hostId?: string) => void;
   onOpenSettings: () => void;
   onOpenStudio?: () => void;
 }
@@ -19,52 +17,40 @@ interface LobbyViewProps {
 export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, onOpenStudio }) => {
   const [name, setName] = useState('');
   const [selectedMode, setSelectedMode] = useState<GameMode>('FFA');
-  const [onlineCount, setOnlineCount] = useState<number>(0);
   const [showGlossary, setShowGlossary] = useState(false);
   const [showGallery, setShowGallery] = useState(false);
   const [showBossGallery, setShowBossGallery] = useState(false);
   const [showLegal, setShowLegal] = useState(false);
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [mounted, setMounted] = useState(false);
+  
+  // P2P State
+  const [lobbyMode, setLobbyMode] = useState<'MAIN' | 'JOIN'>('MAIN');
+  const [targetRoomId, setTargetRoomId] = useState('');
 
-  // Region configuration
   const currentRegion: ServerRegion = { 
-      id: 'global', 
-      name: 'Global Server', 
-      flag: '🌎', 
-      ping: 45, 
-      occupancy: 0, 
-      url: 'firebase', 
-      type: 'OFFICIAL' 
+      id: 'p2p', name: 'Peer-to-Peer', flag: '🔗', ping: 0, occupancy: 0, url: '', type: 'OFFICIAL' 
   };
   
   useEffect(() => { 
       setMounted(true); 
       const savedName = localStorage.getItem('tank_io_nickname');
       if (savedName) setName(savedName);
-      
-      // --- REAL TIME ONLINE COUNT CHECK ---
-      // We listen to the root of the selected room to count children keys
-      // This is actual DB data, not mock.
-      const playerCountRef = ref(db, `rooms/${selectedMode}/players`);
-      
-      const unsubscribe = onValue(playerCountRef, (snapshot) => {
-          if (snapshot.exists()) {
-              // Count the number of keys in the object
-              setOnlineCount(snapshot.size);
-          } else {
-              setOnlineCount(0);
-          }
-      });
+  }, []);
 
-      return () => unsubscribe();
-  }, [selectedMode]); // Re-subscribe if user changes mode
-
-  const handleStart = () => {
-      let finalName = name.trim();
-      if (!finalName) finalName = `Commander_${Math.floor(Math.random()*1000)}`;
+  const handleHost = () => {
+      let finalName = name.trim() || `Commander_${Math.floor(Math.random()*1000)}`;
       localStorage.setItem('tank_io_nickname', finalName);
-      onStart(finalName, selectedMode, FactionType.NONE, 'basic', currentRegion);
+      // Start as Host
+      onStart(finalName, selectedMode, FactionType.NONE, 'basic', currentRegion, true);
+  };
+
+  const handleJoin = () => {
+      if (!targetRoomId.trim()) return alert("Please enter a Room ID!");
+      let finalName = name.trim() || `Guest_${Math.floor(Math.random()*1000)}`;
+      localStorage.setItem('tank_io_nickname', finalName);
+      // Start as Client
+      onStart(finalName, selectedMode, FactionType.NONE, 'basic', currentRegion, false, targetRoomId);
   };
 
   return (
@@ -92,42 +78,19 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
                     TANK.IO
                 </h1>
                 <div className="absolute -bottom-2 right-0 bg-white/10 px-3 py-1 rounded text-[10px] font-bold tracking-[0.5em] text-cyan-400 border border-cyan-500/30 backdrop-blur-md uppercase">
-                    Hybrid Core
-                </div>
-            </div>
-
-            <div className="w-full max-w-md p-4 bg-slate-900/50 border-l-4 border-green-500 rounded-r-xl backdrop-blur-sm flex items-center justify-between shadow-lg">
-                <div className="flex items-center gap-4">
-                    <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_#0f0]"></div>
-                    <div>
-                        <div className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                            <Globe size={12} /> {currentRegion.name}
-                        </div>
-                        <div className="text-sm font-black text-white">LIVE SERVER</div>
-                    </div>
-                </div>
-                <div className="text-right flex gap-6">
-                    <div>
-                        {/* REAL DATA DISPLAY */}
-                        <div className="text-2xl font-mono font-black text-white">{onlineCount}</div>
-                        <div className="text-[9px] text-slate-500 font-bold uppercase">Players Online</div>
-                    </div>
+                    P2P Edition
                 </div>
             </div>
         </div>
 
-        {/* RIGHT: Login */}
+        {/* RIGHT: Login / Mode Select */}
         <div className="w-full md:w-[480px] glass-panel rounded-3xl p-6 md:p-8 flex flex-col gap-6 shadow-2xl relative overflow-hidden shrink-0">
-            <div className="flex justify-end items-center gap-2">
-                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">GUEST ACCESS</span>
-                <div className="w-2 h-2 rounded-full bg-cyan-500"></div>
-            </div>
-
+            
             <div className="space-y-2 mt-2">
                 <label className="text-[10px] font-black text-cyan-500 uppercase tracking-widest ml-1">Callsign</label>
                 <input
                     type="text"
-                    placeholder="ENTER NAME"
+                    placeholder="YOUR NAME"
                     className="w-full bg-slate-900/50 text-white border-2 border-slate-700 rounded-xl px-5 py-4 text-center font-bold text-lg outline-none focus:border-cyan-500 uppercase tracking-wider"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -135,32 +98,73 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
                 />
             </div>
 
-            <div className="space-y-2">
-                <label className="text-[10px] font-black text-cyan-500 uppercase tracking-widest ml-1">Zone</label>
-                <div className="grid grid-cols-1 gap-2 max-h-[200px] overflow-y-auto custom-scrollbar pr-1">
-                    {GAME_MODES.map(mode => (
-                        <button
-                            key={mode.id}
-                            onClick={() => setSelectedMode(mode.id)}
-                            className={`relative px-4 py-3 rounded-xl border transition-all flex items-center justify-between ${selectedMode === mode.id ? 'bg-slate-800 border-white text-white shadow-lg translate-x-1' : 'bg-slate-900/40 border-slate-800 text-slate-500 hover:bg-slate-800'}`}
-                            style={{ borderColor: selectedMode === mode.id ? mode.color : undefined }}
-                        >
-                            <div className="flex items-center gap-3">
-                                <div className={`w-2 h-2 rounded-full ${selectedMode === mode.id ? 'bg-green-500 shadow-[0_0_5px_#0f0]' : 'bg-slate-600'}`} />
-                                <span className="text-xs font-black uppercase tracking-wider">{mode.name}</span>
-                            </div>
-                        </button>
-                    ))}
-                </div>
-            </div>
+            {lobbyMode === 'MAIN' ? (
+                <>
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-cyan-500 uppercase tracking-widest ml-1">Zone</label>
+                        <div className="grid grid-cols-1 gap-2 max-h-[200px] overflow-y-auto custom-scrollbar pr-1">
+                            {GAME_MODES.map(mode => (
+                                <button
+                                    key={mode.id}
+                                    onClick={() => setSelectedMode(mode.id)}
+                                    className={`relative px-4 py-3 rounded-xl border transition-all flex items-center justify-between ${selectedMode === mode.id ? 'bg-slate-800 border-white text-white shadow-lg translate-x-1' : 'bg-slate-900/40 border-slate-800 text-slate-500 hover:bg-slate-800'}`}
+                                    style={{ borderColor: selectedMode === mode.id ? mode.color : undefined }}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className={`w-2 h-2 rounded-full ${selectedMode === mode.id ? 'bg-green-500 shadow-[0_0_5px_#0f0]' : 'bg-slate-600'}`} />
+                                        <span className="text-xs font-black uppercase tracking-wider">{mode.name}</span>
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
 
-            <button
-                onClick={handleStart}
-                className="mt-2 w-full bg-white text-black font-black text-2xl py-5 rounded-xl shadow-[0_0_30px_rgba(255,255,255,0.2)] transition-all hover:scale-[1.02] flex items-center justify-center gap-3"
-            >
-                <Play fill="currentColor" size={24} />
-                DEPLOY
-            </button>
+                    <div className="flex gap-2 mt-2">
+                        <button
+                            onClick={handleHost}
+                            className="flex-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-black py-4 rounded-xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                        >
+                            <Play fill="currentColor" size={20} />
+                            CREATE ROOM
+                        </button>
+                        <button
+                            onClick={() => setLobbyMode('JOIN')}
+                            className="flex-1 bg-slate-800 hover:bg-slate-700 text-white font-black py-4 rounded-xl border-2 border-slate-600 hover:border-slate-500 transition-all active:scale-95 flex items-center justify-center gap-2"
+                        >
+                            <Users size={20} />
+                            JOIN FRIEND
+                        </button>
+                    </div>
+                </>
+            ) : (
+                <div className="space-y-4 animate-fade-in">
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-green-500 uppercase tracking-widest ml-1">Room ID</label>
+                        <input
+                            type="text"
+                            placeholder="PASTE ID HERE"
+                            className="w-full bg-slate-900/50 text-white border-2 border-green-700 rounded-xl px-5 py-4 text-center font-mono font-bold text-sm outline-none focus:border-green-500"
+                            value={targetRoomId}
+                            onChange={(e) => setTargetRoomId(e.target.value)}
+                        />
+                    </div>
+                    
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setLobbyMode('MAIN')}
+                            className="w-1/3 bg-slate-800 text-slate-400 font-bold py-4 rounded-xl hover:bg-slate-700"
+                        >
+                            BACK
+                        </button>
+                        <button
+                            onClick={handleJoin}
+                            className="flex-1 bg-green-600 hover:bg-green-500 text-white font-black py-4 rounded-xl shadow-lg transition-all active:scale-95"
+                        >
+                            CONNECT
+                        </button>
+                    </div>
+                </div>
+            )}
 
             <div className="grid grid-cols-4 gap-2 mt-auto pt-4 border-t border-slate-800">
                 <NavBtn icon={<Settings size={18}/>} label="System" onClick={onOpenSettings} />
