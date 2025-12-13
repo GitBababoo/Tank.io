@@ -230,20 +230,24 @@ export class GameEngine {
     // 1. JOIN EVENT
     this.networkManager.on('player_joined', (data) => {
         if (this.isDestroyed) return;
-        if (this.entityManager.entities.some(e => e.id === data.id)) return; // Already exists
+        
+        // Ensure we don't spawn duplicate players
+        const exists = this.entityManager.entities.some(e => e.id === data.id);
+        if (exists) return;
+
+        console.log(`[NET] Player Joined: ${data.name}`);
 
         const newPlayer: Entity = {
             id: data.id,
             name: data.name,
             type: EntityType.PLAYER,
             pos: data.x ? {x: data.x, y: data.y} : {x:0, y:0},
-            targetPos: data.x ? {x: data.x, y: data.y} : undefined,
             vel: { x: 0, y: 0 }, 
             radius: 20,
             rotation: 0,
             color: data.color || COLORS.enemy,
-            health: 100,
-            maxHealth: 100,
+            health: data.hp || 100,
+            maxHealth: data.maxHp || 100,
             damage: 20,
             isDead: false,
             teamId: data.teamId,
@@ -289,20 +293,24 @@ export class GameEngine {
     this.chatManager.update(dt, entities);
 
     // --- NETWORKING (SEND INPUT) ---
+    // Only sync if not dead to save bandwidth
     if (!player.isDead) {
         this.networkManager.syncPlayerState(player.pos, player.vel, player.rotation);
-        this.networkManager.syncPlayerDetails(
-            player.health, 
-            player.maxHealth, 
-            this.playerManager.state.score, 
-            this.playerManager.state.classPath,
-            this.playerManager.state.level,
-            this.playerManager.state.xp
-        );
+        // Occasionally sync details (heavy data)
+        if (Math.random() < 0.05) { // ~Every 20 frames
+            this.networkManager.syncPlayerDetails(
+                player.health, 
+                player.maxHealth, 
+                this.playerManager.state.score, 
+                this.playerManager.state.classPath,
+                this.playerManager.state.level,
+                this.playerManager.state.xp
+            );
+        }
     }
 
     // --- NETWORKING (APPLY INTERPOLATION) ---
-    // UPDATED: Pass dt for extrapolation logic
+    // Smooths out the movement of other players
     this.networkManager.processInterpolation(entities, dt);
 
     const handleDeath = (v: Entity, k: Entity) => {
@@ -324,6 +332,14 @@ export class GameEngine {
     }
     
     this.aiController.update(dt, entities, player, this.cameraManager, handleDeath);
+    
+    // Auto-population of bots is OPTIONAL. 
+    // If the room is empty, we spawn some bots for fun, but they are NOT "Online Players".
+    // They are of type ENEMY, not PLAYER.
+    if (this.gameMode !== 'SANDBOX') {
+        this.spawnManager.update(dt, entities, player, this.gameMode, (team) => this.entityManager.getSpawnPos(team), this.pushNotification.bind(this));
+    }
+
     this.worldController.update(dt, this.playerController.autoSpin, this.cameraManager, handleDeath);
     
     ParticleSystem.update(entities, dt);

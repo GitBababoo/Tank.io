@@ -7,7 +7,7 @@ import { BossGallery } from './BossGallery';
 import { LegalModal } from './LegalModal';
 import { PrivacyModal } from './PrivacyModal';
 import { Settings, Book, Database, Sword, Play, Globe } from 'lucide-react';
-import { db } from '../firebase';
+import { db } from '../firebase'; // Import real DB
 import { ref, onValue } from 'firebase/database';
 
 interface LobbyViewProps {
@@ -27,7 +27,7 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [mounted, setMounted] = useState(false);
 
-  // Region is now "Global" since Firebase is centralized
+  // Region configuration
   const currentRegion: ServerRegion = { 
       id: 'global', 
       name: 'Global Server', 
@@ -43,18 +43,22 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
       const savedName = localStorage.getItem('tank_io_nickname');
       if (savedName) setName(savedName);
       
-      // Listen to total players in FFA room as a sample
-      const playerCountRef = ref(db, 'rooms/FFA/players');
-      const unsub = onValue(playerCountRef, (snapshot) => {
+      // --- REAL TIME ONLINE COUNT CHECK ---
+      // We listen to the root of the selected room to count children keys
+      // This is actual DB data, not mock.
+      const playerCountRef = ref(db, `rooms/${selectedMode}/players`);
+      
+      const unsubscribe = onValue(playerCountRef, (snapshot) => {
           if (snapshot.exists()) {
+              // Count the number of keys in the object
               setOnlineCount(snapshot.size);
           } else {
               setOnlineCount(0);
           }
       });
 
-      return () => unsub();
-  }, []);
+      return () => unsubscribe();
+  }, [selectedMode]); // Re-subscribe if user changes mode
 
   const handleStart = () => {
       let finalName = name.trim();
@@ -99,13 +103,14 @@ export const LobbyView: React.FC<LobbyViewProps> = ({ onStart, onOpenSettings, o
                         <div className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                             <Globe size={12} /> {currentRegion.name}
                         </div>
-                        <div className="text-sm font-black text-white">ONLINE</div>
+                        <div className="text-sm font-black text-white">LIVE SERVER</div>
                     </div>
                 </div>
                 <div className="text-right flex gap-6">
                     <div>
+                        {/* REAL DATA DISPLAY */}
                         <div className="text-2xl font-mono font-black text-white">{onlineCount}</div>
-                        <div className="text-[9px] text-slate-500 font-bold uppercase">Players</div>
+                        <div className="text-[9px] text-slate-500 font-bold uppercase">Players Online</div>
                     </div>
                 </div>
             </div>
