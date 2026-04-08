@@ -129,8 +129,9 @@ export class WorldSystem {
             });
         }
     }
+  }
 
-    static getSafeSpawnPos(entities: Entity[], gameMode: GameMode, teamId?: string): {x: number, y: number} {
+  static getSafeSpawnPos(entities: Entity[], gameMode: GameMode, teamId?: string): {x: number, y: number} {
       const config = MAP_DEFINITIONS[gameMode];
       const width = config ? config.width : WORLD_SIZE;
       const height = config ? config.height : WORLD_SIZE;

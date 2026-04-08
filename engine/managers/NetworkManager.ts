@@ -32,13 +32,9 @@ export class NetworkManager {
     // --- CONNECT ---
     async joinGame(roomId: string, playerInfo: any): Promise<void> {
         return new Promise((resolve, reject) => {
-            // Determine Server URL (Localhost or Production)
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.hostname;
-            const port = '8080'; // Explicit port for dev
-            
-            // CRITICAL FIX: Include Room ID in URL so server knows where to put the player
-            // Fallback to 'FFA' if roomId is 'SERVER' or undefined
+            const port = '8080';
             const targetRoom = (roomId === 'SERVER' || !roomId) ? 'FFA' : roomId;
             const url = `${protocol}//${host}:${port}/ws?uid=${playerInfo.id || 'guest'}&name=${playerInfo.name}&room=${targetRoom}`;
 
@@ -48,7 +44,6 @@ export class NetworkManager {
                 this.ws = new WebSocket(url);
                 this.ws.binaryType = 'arraybuffer';
 
-                // Timeout if connection takes too long
                 const timeout = setTimeout(() => {
                     if (this.ws?.readyState !== WebSocket.OPEN) {
                         console.error("[NET] Connection Timeout");
@@ -62,7 +57,6 @@ export class NetworkManager {
                     this.isConnected = true;
                     this.isHost = false;
                     console.log("[NET] WebSocket Connected to Room:", targetRoom);
-                    
                     this.sendJson({ t: 'join', d: { room: targetRoom, ...playerInfo } });
                     resolve();
                 };
