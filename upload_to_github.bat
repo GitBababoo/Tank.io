@@ -1,0 +1,19 @@
+@echo off
+echo [Tank.io] Configuring Git Identity (Temporary)...
+git config user.email "gitbababoo@example.com"
+git config user.name "GitBababoo"
+echo.
+echo [Tank.io] Initializing Git...
+git init
+echo [Tank.io] Adding files...
+git add .
+echo [Tank.io] Committing...
+git commit -m "Initial commit: Tank.io Ultimate Edition with Thai Documentation"
+echo [Tank.io] Adding remote origin...
+git remote add origin https://github.com/GitBababoo/Tank.io.git
+echo [Tank.io] Pushing to GitHub (Main)...
+git push -u origin main
+echo.
+echo [Tank.io] Upload process completed! 
+echo If you saw errors above, please make sure you are logged into GitHub and have permission to push to the repository.
+pause

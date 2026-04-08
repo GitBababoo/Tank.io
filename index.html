@@ -1,0 +1,151 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Tank.io: The Ultimate Realtime Shooter</title>
+    <!-- Using Tailwind CDN for simplicity in this setup, though PostCSS is recommended for full prod -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html {
+        height: 100%;
+        overflow: hidden;
+      }
+      body { 
+          width: 100%;
+          height: 100%;
+          margin: 0; 
+          background-color: #1a1a1a; 
+          position: fixed; /* Critical for iOS full screen web app */
+          overflow: hidden;
+          touch-action: none;
+          -webkit-user-select: none;
+          user-select: none;
+          -webkit-touch-callout: none;
+          font-family: system-ui, -apple-system, sans-serif;
+      }
+      #root {
+          width: 100%;
+          height: 100%;
+      }
+      canvas { display: block; outline: none; cursor: crosshair; }
+      
+      /* Mobile Optimizations */
+      .interactive-ui {
+          touch-action: manipulation;
+      }
+      
+      /* Custom Scrollbar for menus */
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); }
+      ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
+      
+      @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes fadeInDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes scaleIn { from { transform: scale(0.9); opacity: 0; } to { opacity: 1; transform: scale(1); } }
+
+      .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+      .animate-fade-in-down { animation: fadeInDown 0.3s ease-out forwards; }
+      .animate-scale-in { animation: scaleIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+      
+      /* Safe area for notched phones */
+      .safe-top { padding-top: env(safe-area-inset-top); }
+      .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+      /* NEW SETTINGS PANEL STYLES */
+      @keyframes scanline {
+        0% { transform: translateY(0); }
+        100% { transform: translateY(100%); }
+      }
+      .scanline-overlay::after {
+        content: "";
+        position: absolute;
+        top: -100%;
+        left: 0;
+        right: 0;
+        bottom: -100%;
+        pointer-events: none;
+        background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.2) 51%);
+        background-size: 100% 6px;
+        animation: scanline 0.15s linear infinite;
+        opacity: 0.2;
+        z-index: 1;
+      }
+
+      /* Custom Slider styles */
+      input[type="range"].custom-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 100%;
+          height: 6px;
+          background: #0f172a; /* slate-900 */
+          border-radius: 3px;
+          outline: none;
+          border: 1px solid #334155; /* slate-700 */
+      }
+      input[type="range"].custom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 20px;
+          height: 20px;
+          background: #e2e8f0; /* slate-200 */
+          cursor: pointer;
+          border-radius: 50%;
+          border: 3px solid #06b6d4; /* cyan-500 */
+          box-shadow: 0 0 8px #06b6d4, inset 0 0 4px #06b6d4;
+          transition: transform 0.1s;
+      }
+      input[type="range"].custom-slider:active::-webkit-slider-thumb {
+          transform: scale(1.2);
+      }
+      input[type="range"].custom-slider::-moz-range-thumb {
+          width: 20px;
+          height: 20px;
+          background: #e2e8f0;
+          cursor: pointer;
+          border-radius: 50%;
+          border: 3px solid #06b6d4;
+          box-shadow: 0 0 8px #06b6d4, inset 0 0 4px #06b6d4;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+    "vite": "https://esm.sh/vite@^7.2.7",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "react": "https://esm.sh/react@^19.2.3",
+    "lucide-react": "https://esm.sh/lucide-react@^0.561.0",
+    "firebase/": "https://esm.sh/firebase@^12.6.0/",
+    "ws": "https://esm.sh/ws@^8.18.3",
+    "url": "https://esm.sh/url@^0.11.4",
+    "express": "https://esm.sh/express@^5.2.1",
+    "path": "https://esm.sh/path@^0.12.7",
+    "@libsql/client": "https://esm.sh/@libsql/client@^0.15.15",
+    "redis": "https://esm.sh/redis@^5.10.0",
+    "bun": "https://esm.sh/bun@^1.3.4",
+    "tailwind-merge": "https://esm.sh/tailwind-merge@^3.4.0",
+    "clsx": "https://esm.sh/clsx@^2.1.1",
+    "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@^5.90.12",
+    "next/": "https://esm.sh/next@^16.0.10/",
+    "next": "https://esm.sh/next@^16.0.10",
+    "@prisma/client": "https://esm.sh/@prisma/client@^7.1.0",
+    "next-auth/": "https://esm.sh/next-auth@^4.24.13/",
+    "next-auth": "https://esm.sh/next-auth@^4.24.13",
+    "tailwindcss": "https://esm.sh/tailwindcss@^4.1.18",
+    "@auth/prisma-adapter": "https://esm.sh/@auth/prisma-adapter@^2.11.1",
+    "peerjs": "https://esm.sh/peerjs@^1.5.5"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

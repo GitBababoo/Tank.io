@@ -1,0 +1,24 @@
+
+{
+  "rules": {
+    "rooms": {
+      ".read": true,
+      ".write": true,
+      "$gameMode": {
+        "players": {
+          "$uid": {
+            // Validate that players must have coordinates (prevents junk data)
+            ".validate": "newData.hasChildren(['x', 'y']) && newData.child('x').isNumber() && newData.child('y').isNumber()"
+          }
+        },
+        "chat": {
+          ".write": true,
+          // Messages must have content and sender
+          "$msgId": {
+             ".validate": "newData.hasChildren(['content', 'sender'])"
+          }
+        }
+      }
+    }
+  }
+}
