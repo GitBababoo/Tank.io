@@ -73,7 +73,7 @@ export class NetworkManager {
 
                 this.ws.onerror = (err) => {
                     console.error("[NET] WebSocket Error", err);
-                    reject(err);
+                    reject(new Error("Connection failed - Server unreachable"));
                 };
             } catch (e) {
                 console.error("[NET] Immediate Connection Error:", e);

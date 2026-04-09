@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "server": "npx tsx components/server/index.ts",
+    "server": "node components/server/index.js",
     "server:node": "node components/server/index.js",
     "start": "concurrently \"npm run server\" \"npm run dev\"",
     "start:node": "concurrently \"npm run server:node\" \"npm run dev\""
